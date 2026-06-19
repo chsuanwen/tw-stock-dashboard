@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 資料庫 / 本機資料(本版本不落地,保險起見一併排除)
+*.db
+*.sqlite
+*.sqlite3
+
+# Streamlit 機密(token、密碼等,切勿上傳)
+.streamlit/secrets.toml
+
+# IDE / 系統
+.vscode/
+.idea/
+.DS_Store
+*.log

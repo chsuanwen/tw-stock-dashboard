@@ -1,0 +1,5 @@
+requests>=2.31
+pandas>=2.0
+SQLAlchemy>=2.0
+streamlit>=1.30
+plotly>=5.18
