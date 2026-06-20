@@ -1,7 +1,8 @@
-"""策略分析層(不落地版)。
+"""策略分析層(不落地版,可組合規則引擎)。
 
-吃 datasource.fetch_bundle() 回傳的記憶體 DataFrame,計算指標、套用篩選。
-價量(Yahoo)支援日/週/月 K 線切換;籌碼(證交所)支援投信連買、外資買超。
+build_metrics: 把每檔股票需要的指標一次算齊(均線、連買天數、均量、區間高點…)。
+apply_filters: 依使用者勾選的條件,用 AND / OR 組合過濾。
+新增策略只要在 build_metrics 補欄位、在 _CONDITIONS 補一條規則即可。
 """
 import pandas as pd
 
@@ -9,16 +10,27 @@ import pandas as pd
 _PV = tuple(int(x) for x in pd.__version__.split(".")[:2])
 _MONTH_RULE = "ME" if _PV >= (2, 2) else "M"
 _WEEK_RULE = "W"
-
-# 時間週期 → resample 頻率代碼
 TIMEFRAMES = {"日": None, "週": _WEEK_RULE, "月": _MONTH_RULE}
+
+# 可選的均線 / 均量 / 突破周期(供 UI 與指標預先計算)
+MA_PERIODS = [5, 10, 20, 60]
+VOL_WINDOWS = [5, 20]
+BREAKOUT_WINDOWS = [20, 60]
+
+
+def _consecutive_buy_days(net_series):
+    """從最新往回數,連續買超(net>0)的天數。"""
+    days = 0
+    for v in net_series.iloc[::-1]:
+        if v > 0:
+            days += 1
+        else:
+            break
+    return days
 
 
 def build_metrics(bundle):
-    """彙整每檔股票的最新指標(以日線為準),回傳 DataFrame(一檔一列)。
-
-    欄位:stock_id, name, date, close, ma20, above_ma20, trust_buy_days, foreign_net
-    """
+    """彙整每檔股票的最新指標(以日線為準),回傳 DataFrame(一檔一列)。"""
     stocks = bundle["stocks"]
     price = bundle["price"]
     inst = bundle["inst"]
@@ -26,56 +38,108 @@ def build_metrics(bundle):
 
     records = []
     for sid in price["stock_id"].unique():
-        # --- 技術面:收盤 vs 20 日均線(月線) ---
         p = price[price["stock_id"] == sid].sort_values("date")
         if p.empty:
             continue
-        p = p.copy()
-        p["ma20"] = p["close"].rolling(20).mean()
-        last = p.iloc[-1]
-        close = float(last["close"])
-        ma20 = float(last["ma20"]) if pd.notna(last["ma20"]) else None
-        above_ma20 = ma20 is not None and close > ma20
+        close = float(p["close"].iloc[-1])
+        volume = int(p["volume"].iloc[-1])
 
-        # --- 籌碼面:投信連買天數 + 外資最新買賣超 ---
-        ins = inst[inst["stock_id"] == sid].sort_values("date")
-        trust_buy_days = 0
-        foreign_net = None
-        if not ins.empty:
-            foreign_net = int(ins.iloc[-1]["foreign_net"])
-            for v in ins["trust_net"].iloc[::-1]:
-                if v > 0:
-                    trust_buy_days += 1
-                else:
-                    break
-
-        records.append({
+        rec = {
             "stock_id": sid,
             "name": name_map.get(sid, sid),
-            "date": last["date"].date(),
+            "date": p["date"].iloc[-1].date(),
             "close": round(close, 2),
-            "ma20": round(ma20, 2) if ma20 else None,
-            "above_ma20": above_ma20,
-            "trust_buy_days": trust_buy_days,
-            "foreign_net": foreign_net,
-        })
+            "volume": volume,
+        }
+        # 各周期均線、均量、區間最高收盤
+        for n in MA_PERIODS:
+            v = p["close"].rolling(n).mean().iloc[-1]
+            rec[f"ma{n}"] = round(float(v), 2) if pd.notna(v) else None
+        for n in VOL_WINDOWS:
+            v = p["volume"].rolling(n).mean().iloc[-1]
+            rec[f"vol_ma{n}"] = float(v) if pd.notna(v) else None
+        for n in BREAKOUT_WINDOWS:
+            v = p["close"].rolling(n).max().iloc[-1]
+            rec[f"high{n}"] = float(v) if pd.notna(v) else None
+
+        # 籌碼面:投信 / 外資 連買天數 + 外資最新買賣超
+        ins = inst[inst["stock_id"] == sid].sort_values("date")
+        if not ins.empty:
+            rec["trust_buy_days"] = _consecutive_buy_days(ins["trust_net"])
+            rec["foreign_buy_days"] = _consecutive_buy_days(ins["foreign_net"])
+            rec["foreign_net"] = int(ins["foreign_net"].iloc[-1])
+        else:
+            rec["trust_buy_days"] = 0
+            rec["foreign_buy_days"] = 0
+            rec["foreign_net"] = None
+
+        records.append(rec)
 
     return pd.DataFrame(records)
 
 
-def apply_filters(metrics, *, use_trust=False, trust_days=3,
-                  use_ma=False, use_foreign=False):
-    """依條件過濾 metrics(各條件為 AND 關係)。"""
-    if metrics.empty:
+# --------------------------------------------------------------------------
+# 條件規則:每條回傳一個布林 Series(對齊 metrics 的 index)
+# --------------------------------------------------------------------------
+
+def _cond_above_ma(m, period=20):
+    return m["close"] > m[f"ma{period}"]
+
+
+def _cond_trust(m, days=3):
+    return m["trust_buy_days"] >= days
+
+
+def _cond_foreign_days(m, days=3):
+    return m["foreign_buy_days"] >= days
+
+
+def _cond_foreign_net(m):
+    return m["foreign_net"].fillna(0) > 0
+
+
+def _cond_volume(m, window=5, ratio=1.5):
+    return m["volume"] > ratio * m[f"vol_ma{window}"]
+
+
+def _cond_breakout(m, window=20):
+    return m["close"] >= m[f"high{window}"]
+
+
+_CONDITIONS = {
+    "above_ma": _cond_above_ma,
+    "trust": _cond_trust,
+    "foreign_days": _cond_foreign_days,
+    "foreign_net": _cond_foreign_net,
+    "volume": _cond_volume,
+    "breakout": _cond_breakout,
+}
+
+
+def apply_filters(metrics, conditions, logic="AND"):
+    """依條件列表過濾。
+
+    conditions: list[(key, params_dict)]，key 對應 _CONDITIONS。
+    logic: "AND"(全部符合) 或 "OR"(任一符合)。
+    沒有任何條件時回傳全部。
+    """
+    if metrics.empty or not conditions:
         return metrics
-    mask = pd.Series(True, index=metrics.index)
-    if use_trust:
-        mask &= metrics["trust_buy_days"] >= trust_days
-    if use_ma:
-        mask &= metrics["above_ma20"]
-    if use_foreign:
-        mask &= metrics["foreign_net"].fillna(0) > 0
-    return metrics[mask]
+
+    masks = []
+    for key, params in conditions:
+        fn = _CONDITIONS.get(key)
+        if fn is None:
+            continue
+        mask = fn(metrics, **params).fillna(False)
+        masks.append(mask)
+    if not masks:
+        return metrics
+
+    combined = masks[0]
+    for mk in masks[1:]:
+        combined = (combined & mk) if logic == "AND" else (combined | mk)
+    return metrics[combined]
 
 
 def get_price_history(bundle, stock_id, timeframe="日"):
@@ -87,7 +151,6 @@ def get_price_history(bundle, stock_id, timeframe="日"):
 
     rule = TIMEFRAMES.get(timeframe)
     if rule is not None:
-        # 週/月:OHLC 重新取樣(開=首、高=最高、低=最低、收=末、量=加總)
         p = (p.set_index("date")
                .resample(rule)
                .agg({"open": "first", "high": "max", "low": "min",
