@@ -20,9 +20,10 @@ _HEADERS = {"User-Agent": "Mozilla/5.0"}
 # Yahoo 股市:日 K / 價量
 # --------------------------------------------------------------------------
 
-def _yahoo_price(stock_id):
-    """抓單檔日 K,回傳統一格式 DataFrame(失敗回空)。"""
-    ticker = f"{stock_id}{config.YAHOO_SUFFIX}"
+def _yahoo_price(stock_id, suffix=None):
+    """抓單檔日 K,回傳統一格式 DataFrame(失敗回空)。suffix 預設用設定值。"""
+    suffix = suffix if suffix is not None else config.YAHOO_SUFFIX
+    ticker = f"{stock_id}{suffix}"
     try:
         h = yf.Ticker(ticker).history(start=config.PRICE_START_DATE, auto_adjust=False)
     except Exception as e:  # noqa: BLE001
@@ -153,4 +154,46 @@ def fetch_bundle(stock_ids=None, progress_cb=None):
         [{"stock_id": sid, "name": name_map.get(sid, sid)} for sid in stock_ids]
     )
 
+    return {"stocks": stocks, "price": price, "inst": inst}
+
+
+def fetch_single(stock_id):
+    """抓「任意單一代號」的價量 + 三大法人,回傳 bundle 格式。
+
+    價量會自動嘗試上市(.TW)與上櫃(.TWO);三大法人(證交所 T86)僅含上市股。
+    """
+    stock_id = str(stock_id).strip()
+
+    # 1) 價量:先試上市 .TW,失敗再試上櫃 .TWO
+    price = pd.DataFrame()
+    used_suffix = ".TW"
+    for suffix in (".TW", ".TWO"):
+        price = _yahoo_price(stock_id, suffix)
+        if not price.empty:
+            used_suffix = suffix
+            break
+    if price.empty:
+        return {"stocks": pd.DataFrame(), "price": price, "inst": pd.DataFrame()}
+
+    # 2) 三大法人:用實際交易日回抓 T86 並過濾此代號(僅上市有)
+    inst_rows, name = [], stock_id
+    dates = sorted(price["date"].dt.strftime("%Y%m%d").unique())[-config.INST_LOOKBACK_DAYS:]
+    session = requests.Session()
+    for d in dates:
+        rec = _fetch_t86(d, session).get(stock_id)
+        if rec:
+            name = rec["name"]
+            inst_rows.append({
+                "stock_id": stock_id, "date": pd.to_datetime(d),
+                "foreign_net": rec["foreign"], "trust_net": rec["trust"],
+                "dealer_net": rec["dealer"],
+            })
+        time.sleep(0.8)
+
+    inst = (pd.DataFrame(inst_rows) if inst_rows
+            else pd.DataFrame(columns=["stock_id", "date", "foreign_net", "trust_net", "dealer_net"]))
+    stocks = pd.DataFrame([{
+        "stock_id": stock_id, "name": name,
+        "ticker": f"{stock_id}{used_suffix}",
+    }])
     return {"stocks": stocks, "price": price, "inst": inst}

@@ -142,6 +142,72 @@ def apply_filters(metrics, conditions, logic="AND"):
     return metrics[combined]
 
 
+def score_stock(row):
+    """對單一檔股票做透明的規則式健檢評分(0~100)。
+
+    row: build_metrics() 回傳 DataFrame 的一列(Series)。
+    回傳 dict:score、grade、suggestion、factors(逐項加分明細)。
+    註:此為機械式多空訊號量化,僅供參考,非投資建議。
+    """
+    def val(key):
+        v = row.get(key)
+        return v if (v is not None and pd.notna(v)) else None
+
+    close = val("close")
+    factors = []
+
+    def add(name, got, full, note):
+        factors.append({"factor": name, "得分": got, "滿分": full, "評語": note})
+
+    # --- 技術面 ---
+    ma20, ma60, ma5 = val("ma20"), val("ma60"), val("ma5")
+    ok = close is not None and ma20 is not None and close > ma20
+    add("站上月線(MA20)", 15 if ok else 0, 15, "收盤在月線之上" if ok else "收盤跌破月線")
+
+    ok = close is not None and ma60 is not None and close > ma60
+    add("站上季線(MA60)", 15 if ok else 0, 15, "中長期偏多" if ok else "中長期偏弱")
+
+    ok = None not in (ma5, ma20, ma60) and ma5 > ma20 > ma60
+    add("均線多頭排列", 10 if ok else 0, 10, "MA5>MA20>MA60" if ok else "均線未呈多頭")
+
+    vol, vol_ma5 = val("volume"), val("vol_ma5")
+    ok = vol is not None and vol_ma5 is not None and vol > 1.2 * vol_ma5
+    add("量能放大", 10 if ok else 0, 10, "量>1.2倍5日均量" if ok else "量能未明顯放大")
+
+    high20 = val("high20")
+    ok = close is not None and high20 is not None and close >= high20
+    add("突破20日新高", 10 if ok else 0, 10, "創20日新高" if ok else "未創20日新高")
+
+    # --- 籌碼面 ---
+    td = val("trust_buy_days") or 0
+    g = 15 if td >= 3 else (8 if td >= 1 else 0)
+    add("投信連續買超", g, 15, f"投信連買 {td} 天")
+
+    fd = val("foreign_buy_days") or 0
+    g = 15 if fd >= 3 else (8 if fd >= 1 else 0)
+    add("外資連續買超", g, 15, f"外資連買 {fd} 天")
+
+    fn = val("foreign_net")
+    ok = fn is not None and fn > 0
+    add("外資當日買超", 10 if ok else 0, 10,
+        f"外資買超 {fn:,.0f} 股" if ok else "外資未買超")
+
+    total = sum(f["得分"] for f in factors)
+    full = sum(f["滿分"] for f in factors)
+    score = round(total / full * 100) if full else 0
+
+    if score >= 70:
+        grade, suggestion = "偏多", "技術與籌碼同步轉強,趨勢偏多,可留意;仍須注意大盤與停損。"
+    elif score >= 50:
+        grade, suggestion = "中性偏多", "部分指標轉強,留意能否持續;追高需謹慎。"
+    elif score >= 30:
+        grade, suggestion = "中性偏弱", "多空訊號分歧,建議觀望、等待方向明確。"
+    else:
+        grade, suggestion = "偏空", "多數指標轉弱,趨勢偏空,不宜貿然進場。"
+
+    return {"score": score, "grade": grade, "suggestion": suggestion, "factors": factors}
+
+
 def get_price_history(bundle, stock_id, timeframe="日"):
     """取單檔 K 線資料,依 timeframe(日/週/月)重新取樣,並附 MA5/20/60。"""
     p = bundle["price"]
