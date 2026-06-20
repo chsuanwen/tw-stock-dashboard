@@ -26,6 +26,12 @@ STOCK_LIST = [
 # Yahoo 股市代號後綴:上市 .TW、上櫃 .TWO(本清單皆為上市)
 YAHOO_SUFFIX = ".TW"
 
+# 全上市股票清單(含產業別)來源:TWSE OpenAPI 月營收彙總(有中文產業別)
+TWSE_UNIVERSE_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
+
+# 依產業選股時,單次最多抓取的檔數上限(保護即時抓取的反應速度)
+MAX_UNIVERSE = 300
+
 # 日 K 抓取起始日(約一年,足夠算月線與週/月線圖)
 PRICE_START_DATE = "2024-06-01"
 

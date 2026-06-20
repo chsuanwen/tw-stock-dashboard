@@ -16,7 +16,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 import config
-from datasource import fetch_bundle, fetch_single, fetch_revenue
+from datasource import fetch_bundle, fetch_single, fetch_revenue, fetch_universe
 from strategy.screener import (
     build_metrics, apply_filters, get_price_history, score_stock,
     MA_PERIODS, VOL_WINDOWS, BREAKOUT_WINDOWS,
@@ -28,8 +28,13 @@ st.caption("資料來源:Yahoo 股市(價量)＋ 臺灣證券交易所/櫃買中
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
-def load_bundle():
-    return fetch_bundle()
+def load_bundle(stock_ids):
+    return fetch_bundle(list(stock_ids))
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def load_universe():
+    return fetch_universe()
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
@@ -88,6 +93,29 @@ def make_kline_fig(hist, timeframe):
 # ==========================================================================
 # 側欄:條件面板 + AND/OR
 # ==========================================================================
+# --- 追蹤股池:依產業選股 ---
+st.sidebar.header("追蹤股池")
+universe = load_universe()
+industries = sorted(universe["industry"].unique()) if not universe.empty else []
+sel_inds = st.sidebar.multiselect(
+    "選擇產業(可多選;不選=用預設清單)", industries,
+    help="選定產業後,系統只抓取並分析該產業的股票。")
+max_n = st.sidebar.slider("最多抓取檔數", 10, config.MAX_UNIVERSE, 60, 10,
+                          help="即時抓取,檔數越多等待越久(三大法人為固定成本)。")
+
+pool_capped = False
+if sel_inds and not universe.empty:
+    pool = universe[universe["industry"].isin(sel_inds)]["stock_id"].tolist()
+    pool_capped = len(pool) > max_n
+    pool = pool[:max_n]
+    pool_label = "、".join(sel_inds)
+else:
+    pool = list(config.STOCK_LIST)
+    pool_label = "預設清單"
+st.sidebar.caption(f"目前股池:{pool_label}（{len(pool)} 檔）"
+                   + ("　⚠️ 已截斷至上限" if pool_capped else ""))
+st.sidebar.divider()
+
 st.sidebar.header("選股條件")
 logic_label = st.sidebar.radio(
     "條件組合邏輯", ["全部符合 (AND)", "任一符合 (OR)"], index=0,
@@ -143,9 +171,10 @@ if st.sidebar.button("🔄 立即重抓最新資料"):
 # ==========================================================================
 # 抓資料 + 算指標 + 套用條件
 # ==========================================================================
-with st.spinner("正在向 Yahoo / 證交所 / MOPS 抓取最新資料…(首次約需數十秒,之後快取秒開)"):
+with st.spinner(f"正在抓取 {len(pool)} 檔股票資料(Yahoo / 證交所 / MOPS)…"
+                "(檔數多時首次需數十秒~數分鐘,之後快取秒開)"):
     try:
-        bundle = load_bundle()
+        bundle = load_bundle(tuple(pool))
         revenue_sii = load_revenue("sii")
         metrics = build_metrics(bundle, revenue_sii)
     except Exception as e:  # noqa: BLE001
@@ -156,8 +185,15 @@ if metrics.empty:
     st.warning("抓不到資料,請稍候再按「立即重抓最新資料」。")
     st.stop()
 
-# 預先備好每檔的連結欄
+# 用全市場清單補上正確的名稱與產業別
 metrics = metrics.copy()
+if not universe.empty:
+    nm = dict(zip(universe["stock_id"], universe["name"]))
+    im = dict(zip(universe["stock_id"], universe["industry"]))
+    metrics["name"] = metrics["stock_id"].map(nm).fillna(metrics["name"])
+    metrics["industry"] = metrics["stock_id"].map(im).fillna("")
+else:
+    metrics["industry"] = ""
 metrics["個股"] = metrics["stock_id"].apply(quote_url)
 metrics["新聞"] = metrics.apply(lambda r: news_url(r["stock_id"], r["name"]), axis=1)
 
@@ -221,13 +257,14 @@ st.subheader("🏆 強勢股排名(依區間漲幅)")
 period = st.radio("排名區間", ["3 日", "30 日"], horizontal=True, index=1,
                   help="以 N 個交易日前到今天的收盤價漲跌幅排序。")
 col = "ret_3d" if period.startswith("3 ") else "ret_30d"
-rank = metrics[["stock_id", "name", "close", col, "個股", "新聞"]].dropna(subset=[col]).copy()
+rank = metrics[["stock_id", "name", "industry", "close", col, "個股", "新聞"]].dropna(subset=[col]).copy()
 rank = rank.sort_values(col, ascending=False).reset_index(drop=True)
 rank.insert(0, "名次", rank.index + 1)
 rank["漲跌幅"] = rank[col].apply(lambda v: f"{v:+.2f}%")
-rank = rank[["名次", "stock_id", "name", "close", "漲跌幅", "個股", "新聞"]]
+rank = rank[["名次", "stock_id", "name", "industry", "close", "漲跌幅", "個股", "新聞"]]
 st.dataframe(
-    rank.rename(columns={"stock_id": "代號", "name": "名稱", "close": "收盤"}),
+    rank.rename(columns={"stock_id": "代號", "name": "名稱",
+                         "industry": "產業", "close": "收盤"}),
     use_container_width=True, hide_index=True, column_config=LINK_COLS,
 )
 

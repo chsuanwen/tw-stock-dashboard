@@ -30,6 +30,76 @@ def _to_float(x):
 # Yahoo 股市:日 K / 價量
 # --------------------------------------------------------------------------
 
+def _strip_tz(series):
+    """把日期序列轉成無時區、正規化到當日 0 點(相容 tz-aware / tz-naive)。"""
+    s = pd.to_datetime(series)
+    try:
+        s = s.dt.tz_localize(None)   # tz-aware → naive
+    except TypeError:
+        pass                          # 本來就是 naive
+    return s.dt.normalize()
+
+
+def _yahoo_prices_batch(stock_ids):
+    """批次抓多檔日 K(一次 download,較逐檔快很多)。回傳合併 DataFrame。"""
+    tickers = [f"{s}{config.YAHOO_SUFFIX}" for s in stock_ids]
+    cols = ["stock_id", "date", "open", "high", "low", "close", "volume"]
+    if not tickers:
+        return pd.DataFrame(columns=cols)
+    try:
+        data = yf.download(tickers, start=config.PRICE_START_DATE, auto_adjust=False,
+                           group_by="ticker", threads=True, progress=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] Yahoo 批次抓取失敗: {e}")
+        return pd.DataFrame(columns=cols)
+    if data is None or data.empty:
+        return pd.DataFrame(columns=cols)
+
+    multi = len(tickers) > 1
+    frames = []
+    for sid in stock_ids:
+        t = f"{sid}{config.YAHOO_SUFFIX}"
+        try:
+            sub = data[t] if multi else data
+        except KeyError:
+            continue
+        sub = sub.dropna(subset=["Close"])
+        if sub.empty:
+            continue
+        sub = sub.reset_index()
+        frames.append(pd.DataFrame({
+            "stock_id": sid,
+            "date": _strip_tz(sub["Date"]),
+            "open": sub["Open"].astype(float),
+            "high": sub["High"].astype(float),
+            "low": sub["Low"].astype(float),
+            "close": sub["Close"].astype(float),
+            "volume": sub["Volume"].fillna(0).astype("int64"),
+        }))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
+
+
+def fetch_universe():
+    """全上市股票清單(代號 / 名稱 / 產業別),供依產業選股。"""
+    cols = ["stock_id", "name", "industry"]
+    try:
+        j = requests.get(config.TWSE_UNIVERSE_URL, headers=_HEADERS, timeout=30).json()
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 取得股票清單失敗: {e}")
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for r in j:
+        code = str(r.get("公司代號", "")).strip()
+        if not re.fullmatch(r"\d{4}", code):
+            continue
+        rows.append({
+            "stock_id": code,
+            "name": str(r.get("公司名稱", "")).strip(),
+            "industry": str(r.get("產業別", "")).strip(),
+        })
+    return pd.DataFrame(rows).sort_values("stock_id").reset_index(drop=True)
+
+
 def _yahoo_price(stock_id, suffix=None):
     """抓單檔日 K,回傳統一格式 DataFrame(失敗回空)。suffix 預設用設定值。"""
     suffix = suffix if suffix is not None else config.YAHOO_SUFFIX
@@ -155,16 +225,10 @@ def fetch_bundle(stock_ids=None, progress_cb=None):
     stock_ids = stock_ids or config.STOCK_LIST
     total = len(stock_ids) + 1  # +1 給三大法人階段
 
-    # 1) Yahoo:逐檔抓日 K
-    prices = []
-    for i, sid in enumerate(stock_ids, 1):
-        df = _yahoo_price(sid)
-        if not df.empty:
-            prices.append(df)
-        if progress_cb:
-            progress_cb(i, total, f"Yahoo 價量 {sid}")
-    price = (pd.concat(prices, ignore_index=True) if prices
-             else pd.DataFrame(columns=["stock_id", "date", "open", "high", "low", "close", "volume"]))
+    # 1) Yahoo:批次抓日 K(一次 download,適合較大股池)
+    price = _yahoo_prices_batch(stock_ids)
+    if progress_cb:
+        progress_cb(len(stock_ids), total, "Yahoo 價量")
 
     # 2) 證交所:用實際交易日(取自價量資料)回抓最近 N 天三大法人
     inst_rows = []
