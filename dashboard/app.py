@@ -48,8 +48,11 @@ TF_KEY = {"D": "tf_day", "W": "tf_week", "M": "tf_month"}
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
-def load_bundle(stock_ids):
-    return fetch_bundle(list(stock_ids))
+def load_bundle(pool_items):
+    """pool_items: tuple[(stock_id, market)]，market 為 'sii'/'otc'。"""
+    ids = [s for s, _ in pool_items]
+    markets = {s: m for s, m in pool_items}
+    return fetch_bundle(ids, markets)
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
@@ -127,15 +130,29 @@ def make_kline_fig(hist, tf_code):
 # ==========================================================================
 st.sidebar.header(t("sb_pool_header"))
 universe = load_universe()
-industries = sorted(universe["industry"].unique()) if not universe.empty else []
+
+# 市場別:上市 / 上櫃 / 兩者都要(舊資料無 market 欄位時一律當上市)
+MKT_KEYS = ["both", "sii", "otc"]
+mkt_key = st.sidebar.radio(t("pool_market"), MKT_KEYS, index=0, horizontal=True,
+                           format_func=lambda k: t("mkt_" + k), help=t("pool_market_help"))
+if universe.empty or "market" not in universe.columns or mkt_key == "both":
+    uni_view = universe
+else:
+    uni_view = universe[universe["market"] == mkt_key]
+
+industries = sorted(uni_view["industry"].unique()) if not uni_view.empty else []
 sel_inds = st.sidebar.multiselect(t("pool_select"), industries, help=t("pool_select_help"))
 max_n = st.sidebar.slider(t("pool_max"), 10, config.MAX_UNIVERSE, 60, 10, help=t("pool_max_help"))
 
 pool_capped = False
-if sel_inds and not universe.empty:
-    pool = universe[universe["industry"].isin(sel_inds)]["stock_id"].tolist()
-    pool_capped = len(pool) > max_n
-    pool = pool[:max_n]
+pool_items = []
+if sel_inds and not uni_view.empty:
+    sub = uni_view[uni_view["industry"].isin(sel_inds)]
+    mkt_series = sub["market"] if "market" in sub.columns else ["sii"] * len(sub)
+    items = list(zip(sub["stock_id"], mkt_series))
+    pool_capped = len(items) > max_n
+    pool_items = items[:max_n]
+    pool = [s for s, _ in pool_items]
     pool_label = "、".join(sel_inds)
 else:
     pool = []
@@ -251,10 +268,13 @@ bc2.button(t("btn_clear"), on_click=clear_conditions, use_container_width=True,
 def render_screening():
     with st.spinner(t("spinner_fetch", n=len(pool))):
         try:
-            bundle = load_bundle(tuple(pool))
-            revenue_sii = load_revenue("sii")
+            bundle = load_bundle(tuple(pool_items))
+            revenue = load_revenue("sii")
+            # 股池含上櫃時,合併上櫃月營收(否則上櫃股的營收條件會缺值)
+            if any(m == "otc" for _, m in pool_items):
+                revenue = pd.concat([revenue, load_revenue("otc")], ignore_index=True)
             index_ret = load_index_returns()
-            metrics = build_metrics(bundle, revenue_sii, index_ret)
+            metrics = build_metrics(bundle, revenue, index_ret)
         except Exception as e:  # noqa: BLE001
             st.error(t("err_fetch") + f"\n\n{e}")
             return
@@ -264,6 +284,7 @@ def render_screening():
         return
 
     metrics = metrics.copy()
+    mkt_map = {s: m for s, m in pool_items}
     if not universe.empty:
         nm = dict(zip(universe["stock_id"], universe["name"]))
         im = dict(zip(universe["stock_id"], universe["industry"]))
@@ -271,7 +292,8 @@ def render_screening():
         metrics["industry"] = metrics["stock_id"].map(im).fillna("")
     else:
         metrics["industry"] = ""
-    metrics["個股"] = metrics["stock_id"].apply(quote_url)
+    metrics["個股"] = metrics["stock_id"].apply(
+        lambda s: quote_url(s, config.MARKET_SUFFIX.get(mkt_map.get(s, "sii"), ".TW")))
     metrics["新聞"] = metrics.apply(lambda r: news_url(r["stock_id"], r["name"]), axis=1)
 
     result = apply_filters(metrics, conditions, logic)

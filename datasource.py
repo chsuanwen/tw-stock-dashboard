@@ -40,9 +40,13 @@ def _strip_tz(series):
     return s.dt.normalize()
 
 
-def _yahoo_prices_batch(stock_ids):
-    """批次抓多檔日 K(一次 download,較逐檔快很多)。回傳合併 DataFrame。"""
-    tickers = [f"{s}{config.YAHOO_SUFFIX}" for s in stock_ids]
+def _yahoo_prices_batch(stock_ids, suffix=None):
+    """批次抓多檔日 K(一次 download,較逐檔快很多)。回傳合併 DataFrame。
+
+    suffix: Yahoo 代號後綴(上市 .TW / 上櫃 .TWO),預設用設定值。
+    """
+    suffix = suffix if suffix is not None else config.YAHOO_SUFFIX
+    tickers = [f"{s}{suffix}" for s in stock_ids]
     cols = ["stock_id", "date", "open", "high", "low", "close", "volume"]
     if not tickers:
         return pd.DataFrame(columns=cols)
@@ -55,13 +59,16 @@ def _yahoo_prices_batch(stock_ids):
     if data is None or data.empty:
         return pd.DataFrame(columns=cols)
 
-    multi = len(tickers) > 1
+    # group_by="ticker" 即使單檔也是以代號為頂層的 MultiIndex,優先用 data[ticker] 取值;
+    # 少數情況回傳非分組欄位時退回整張表。
     frames = []
     for sid in stock_ids:
-        t = f"{sid}{config.YAHOO_SUFFIX}"
+        t = f"{sid}{suffix}"
         try:
-            sub = data[t] if multi else data
+            sub = data[t]
         except KeyError:
+            sub = data
+        if "Close" not in getattr(sub, "columns", []):
             continue
         sub = sub.dropna(subset=["Close"])
         if sub.empty:
@@ -97,24 +104,34 @@ def fetch_index_returns():
 
 
 def fetch_universe():
-    """全上市股票清單(代號 / 名稱 / 產業別),供依產業選股。"""
-    cols = ["stock_id", "name", "industry"]
-    try:
-        j = requests.get(config.TWSE_UNIVERSE_URL, headers=_HEADERS, timeout=30).json()
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] 取得股票清單失敗: {e}")
-        return pd.DataFrame(columns=cols)
+    """全上市 + 上櫃股票清單(代號 / 名稱 / 產業別 / 市場別),供依產業選股。
+
+    market 欄位:"sii"(上市)/ "otc"(上櫃),供後續以正確後綴與籌碼來源抓取。
+    """
+    cols = ["stock_id", "name", "industry", "market"]
+    sources = [(config.TWSE_UNIVERSE_URL, "sii"), (config.TPEX_UNIVERSE_URL, "otc")]
     rows = []
-    for r in j:
-        code = str(r.get("公司代號", "")).strip()
-        if not re.fullmatch(r"\d{4}", code):
+    for url, market in sources:
+        try:
+            j = requests.get(url, headers=_HEADERS, timeout=30).json()
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 取得{market}股票清單失敗: {e}")
             continue
-        rows.append({
-            "stock_id": code,
-            "name": str(r.get("公司名稱", "")).strip(),
-            "industry": str(r.get("產業別", "")).strip(),
-        })
-    return pd.DataFrame(rows).sort_values("stock_id").reset_index(drop=True)
+        for r in j:
+            code = str(r.get("公司代號", "")).strip()
+            if not re.fullmatch(r"\d{4}", code):
+                continue
+            rows.append({
+                "stock_id": code,
+                "name": str(r.get("公司名稱", "")).strip(),
+                "industry": str(r.get("產業別", "")).strip(),
+                "market": market,
+            })
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return (pd.DataFrame(rows, columns=cols)
+            .drop_duplicates("stock_id")
+            .sort_values("stock_id").reset_index(drop=True))
 
 
 def _yahoo_price(stock_id, suffix=None):
@@ -234,42 +251,59 @@ def _fetch_tpex_insti(date_yyyymmdd, session):
 # 主入口
 # --------------------------------------------------------------------------
 
-def fetch_bundle(stock_ids=None, progress_cb=None):
-    """抓取所有股票的價量(Yahoo)+ 三大法人(證交所),回傳 dict[str, DataFrame]。
+def fetch_bundle(stock_ids=None, markets=None, progress_cb=None):
+    """抓取所有股票的價量(Yahoo)+ 三大法人(證交所/櫃買),回傳 dict[str, DataFrame]。
 
+    markets: {stock_id: "sii"/"otc"} 市場別對照;未提供者一律視為上市(sii)。
+    上市走證交所 T86、上櫃走櫃買中心 TPEx,並各自套用 .TW / .TWO 後綴。
     progress_cb(done, total, label): 選用的進度回呼。
     """
-    stock_ids = stock_ids or config.STOCK_LIST
+    stock_ids = list(stock_ids) if stock_ids else list(config.STOCK_LIST)
+    markets = markets or {}
     total = len(stock_ids) + 1  # +1 給三大法人階段
 
-    # 1) Yahoo:批次抓日 K(一次 download,適合較大股池)
-    price = _yahoo_prices_batch(stock_ids)
+    sii_ids = [s for s in stock_ids if markets.get(s, "sii") != "otc"]
+    otc_ids = [s for s in stock_ids if markets.get(s, "sii") == "otc"]
+
+    # 1) Yahoo:依市場用正確後綴批次抓日 K(一次 download,適合較大股池)
+    cols = ["stock_id", "date", "open", "high", "low", "close", "volume"]
+    frames = []
+    if sii_ids:
+        frames.append(_yahoo_prices_batch(sii_ids, config.MARKET_SUFFIX["sii"]))
+    if otc_ids:
+        frames.append(_yahoo_prices_batch(otc_ids, config.MARKET_SUFFIX["otc"]))
+    frames = [f for f in frames if not f.empty]
+    price = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
     if progress_cb:
         progress_cb(len(stock_ids), total, "Yahoo 價量")
 
-    # 2) 證交所:用實際交易日(取自價量資料)回抓最近 N 天三大法人
+    # 2) 三大法人:用實際交易日(取自價量資料)回抓最近 N 天,依市場路由來源
     inst_rows = []
     name_map = {}
     if not price.empty:
         dates = sorted(price["date"].dt.strftime("%Y%m%d").unique())[-config.INST_LOOKBACK_DAYS:]
         session = requests.Session()
-        wanted = set(stock_ids)
+        sii_wanted, otc_wanted = set(sii_ids), set(otc_ids)
         for d in dates:
-            t86 = _fetch_t86(d, session)
-            for sid in wanted:
-                rec = t86.get(sid)
-                if rec:
-                    name_map.setdefault(sid, rec["name"])
-                    inst_rows.append({
-                        "stock_id": sid,
-                        "date": pd.to_datetime(d),
-                        "foreign_net": rec["foreign"],
-                        "trust_net": rec["trust"],
-                        "dealer_net": rec["dealer"],
-                    })
-            time.sleep(0.8)  # 禮貌性間隔,避免被證交所限流
+            day = {}
+            if sii_wanted:
+                day.update({sid: rec for sid, rec in _fetch_t86(d, session).items()
+                            if sid in sii_wanted})
+            if otc_wanted:
+                day.update({sid: rec for sid, rec in _fetch_tpex_insti(d, session).items()
+                            if sid in otc_wanted})
+            for sid, rec in day.items():
+                name_map.setdefault(sid, rec["name"])
+                inst_rows.append({
+                    "stock_id": sid,
+                    "date": pd.to_datetime(d),
+                    "foreign_net": rec["foreign"],
+                    "trust_net": rec["trust"],
+                    "dealer_net": rec["dealer"],
+                })
+            time.sleep(0.8)  # 禮貌性間隔,避免被證交所/櫃買限流
         if progress_cb:
-            progress_cb(total, total, "證交所 三大法人")
+            progress_cb(total, total, "證交所/櫃買 三大法人")
 
     inst = (pd.DataFrame(inst_rows) if inst_rows
             else pd.DataFrame(columns=["stock_id", "date", "foreign_net", "trust_net", "dealer_net"]))

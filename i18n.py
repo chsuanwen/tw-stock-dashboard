@@ -19,6 +19,14 @@ T = {
 
     # --- 股池 ---
     "sb_pool_header": {"zh": "追蹤股池", "en": "Stock Pool", "ja": "対象銘柄プール", "ko": "추적 종목 풀"},
+    "pool_market": {"zh": "市場別", "en": "Market", "ja": "市場", "ko": "시장"},
+    "pool_market_help": {"zh": "選擇要納入的市場:上市、上櫃、或兩者皆要(影響可選的產業與抓取的股票)。",
+                         "en": "Which market(s) to include: listed (TWSE), OTC (TPEx), or both. Affects available industries and fetched stocks.",
+                         "ja": "対象市場:上場(TWSE)、店頭(TPEx)、または両方。選べる業種と取得銘柄に影響。",
+                         "ko": "포함할 시장: 상장(TWSE), 장외(TPEx), 또는 둘 다. 선택 가능한 산업과 조회 종목에 영향."},
+    "mkt_both": {"zh": "上市+上櫃", "en": "Listed + OTC", "ja": "上場+店頭", "ko": "상장+장외"},
+    "mkt_sii": {"zh": "上市", "en": "Listed (TWSE)", "ja": "上場 (TWSE)", "ko": "상장 (TWSE)"},
+    "mkt_otc": {"zh": "上櫃", "en": "OTC (TPEx)", "ja": "店頭 (TPEx)", "ko": "장외 (TPEx)"},
     "pool_select": {"zh": "選擇產業(可多選)", "en": "Select industries (multi)",
                     "ja": "業種を選択(複数可)", "ko": "산업 선택(다중)"},
     "pool_select_help": {"zh": "選定產業後,系統只抓取並分析該產業的股票。",

@@ -28,9 +28,14 @@ YAHOO_SUFFIX = ".TW"
 
 # 全上市股票清單(含產業別)來源:TWSE OpenAPI 月營收彙總(有中文產業別)
 TWSE_UNIVERSE_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
+# 全上櫃股票清單(含產業別)來源:TPEx OpenAPI 月營收彙總(欄位同上市,含中文產業別)
+TPEX_UNIVERSE_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"
+
+# Yahoo 股市代號後綴對照:上市 sii→.TW、上櫃 otc→.TWO
+MARKET_SUFFIX = {"sii": ".TW", "otc": ".TWO"}
 
 # 依產業選股時,單次最多抓取的檔數上限(保護即時抓取的反應速度)
-MAX_UNIVERSE = 300
+MAX_UNIVERSE = 1000
 
 # 日 K 抓取起始日(約一年,足夠算月線與週/月線圖)
 PRICE_START_DATE = "2024-06-01"
