@@ -10,7 +10,8 @@ import pandas as pd
 _PV = tuple(int(x) for x in pd.__version__.split(".")[:2])
 _MONTH_RULE = "ME" if _PV >= (2, 2) else "M"
 _WEEK_RULE = "W"
-TIMEFRAMES = {"日": None, "週": _WEEK_RULE, "月": _MONTH_RULE}
+# 時間週期內部代碼(與顯示語言無關):D=日、W=週、M=月
+TIMEFRAMES = {"D": None, "W": _WEEK_RULE, "M": _MONTH_RULE}
 
 # 可選的均線 / 均量 周期(供 UI 與指標預先計算)
 MA_PERIODS = [5, 10, 20, 60]
@@ -243,9 +244,9 @@ def apply_filters(metrics, conditions, logic="AND"):
 def score_stock(row):
     """對單一檔股票做透明的規則式健檢評分(0~100)。
 
-    row: build_metrics() 回傳 DataFrame 的一列(Series)。
-    回傳 dict:score、grade、suggestion、factors(逐項加分明細)。
-    註:此為機械式多空訊號量化,僅供參考,非投資建議。
+    回傳「結構化、可多語化」的資料(不含寫死文字):
+      score、grade_key、factors[{key(因子名鍵), got, full, note_key, val}]。
+    顯示文字由前端依語言以 i18n 對照。此為機械式量化,僅供參考,非投資建議。
     """
     def val(key):
         v = row.get(key)
@@ -254,84 +255,77 @@ def score_stock(row):
     close = val("close")
     factors = []
 
-    def add(name, got, full, note):
-        factors.append({"factor": name, "得分": got, "滿分": full, "評語": note})
+    def add(key, got, full, note_key, v=None):
+        factors.append({"key": key, "got": got, "full": full, "note_key": note_key, "val": v})
 
     # --- 技術面 ---
     ma20, ma60, ma5 = val("ma20"), val("ma60"), val("ma5")
     ok = close is not None and ma20 is not None and close > ma20
-    add("站上月線(MA20)", 15 if ok else 0, 15, "收盤在月線之上" if ok else "收盤跌破月線")
+    add("f_above_ma20", 15 if ok else 0, 15, "n_above_ma20_y" if ok else "n_above_ma20_n")
 
     ok = close is not None and ma60 is not None and close > ma60
-    add("站上季線(MA60)", 15 if ok else 0, 15, "中長期偏多" if ok else "中長期偏弱")
+    add("f_above_ma60", 15 if ok else 0, 15, "n_above_ma60_y" if ok else "n_above_ma60_n")
 
     ok = None not in (ma5, ma20, ma60) and ma5 > ma20 > ma60
-    add("均線多頭排列", 10 if ok else 0, 10, "MA5>MA20>MA60" if ok else "均線未呈多頭")
+    add("f_ma_bull", 10 if ok else 0, 10, "n_ma_bull_y" if ok else "n_ma_bull_n")
 
     vol, vol_ma5 = val("volume"), val("vol_ma5")
     ok = vol is not None and vol_ma5 is not None and vol > 1.2 * vol_ma5
-    add("量能放大", 10 if ok else 0, 10, "量>1.2倍5日均量" if ok else "量能未明顯放大")
+    add("f_volume", 10 if ok else 0, 10, "n_volume_y" if ok else "n_volume_n")
 
-    nh = val("new_high_days") or 1
+    nh = int(val("new_high_days") or 1)
     ok = nh >= 20
-    add("突破20日新高", 10 if ok else 0, 10,
-        f"創 {nh} 日新高" if ok else f"近高僅 {nh} 日(未達20日)")
+    add("f_breakout", 10 if ok else 0, 10, "n_breakout_y" if ok else "n_breakout_n", nh)
 
     # --- 籌碼面 ---
-    td = val("trust_buy_days") or 0
-    g = 15 if td >= 3 else (8 if td >= 1 else 0)
-    add("投信連續買超", g, 15, f"投信連買 {td} 天")
+    td = int(val("trust_buy_days") or 0)
+    add("f_trust", 15 if td >= 3 else (8 if td >= 1 else 0), 15, "n_trust", td)
 
-    fd = val("foreign_buy_days") or 0
-    g = 15 if fd >= 3 else (8 if fd >= 1 else 0)
-    add("外資連續買超", g, 15, f"外資連買 {fd} 天")
+    fd = int(val("foreign_buy_days") or 0)
+    add("f_foreign", 15 if fd >= 3 else (8 if fd >= 1 else 0), 15, "n_foreign", fd)
 
     fn = val("foreign_net")
     ok = fn is not None and fn > 0
-    add("外資當日買超", 10 if ok else 0, 10,
-        f"外資買超 {fn:,.0f} 股" if ok else "外資未買超")
+    add("f_foreign_net", 10 if ok else 0, 10,
+        "n_foreign_net_y" if ok else "n_foreign_net_n", fn if ok else None)
 
     dn = val("dealer_net")
     ok = dn is not None and dn > 0
-    add("自營商當日買超", 5 if ok else 0, 5,
-        f"自營商買超 {dn:,.0f} 股" if ok else "自營商未買超")
+    add("f_dealer_net", 5 if ok else 0, 5,
+        "n_dealer_net_y" if ok else "n_dealer_net_n", dn if ok else None)
 
     tn = val("total_net")
     ok = tn is not None and tn > 0
-    add("三大法人合計買超", 10 if ok else 0, 10,
-        f"三大法人合計買超 {tn:,.0f} 股" if ok else "三大法人合計未買超")
+    add("f_total_net", 10 if ok else 0, 10,
+        "n_total_net_y" if ok else "n_total_net_n", tn if ok else None)
 
     # --- 基本面(僅在有月營收資料時計入)---
     yoy = val("rev_yoy")
     if yoy is not None:
-        g = 15 if yoy >= 20 else (8 if yoy >= 0 else 0)
-        add("營收年增", g, 15, f"營收年增 {yoy:+.1f}%")
-
-        gm = val("rev_growth_months") or 0
-        g = 10 if gm >= 3 else (5 if gm >= 1 else 0)
-        add("營收連續成長", g, 10, f"年增連續為正 {gm} 個月")
-
+        add("f_rev_yoy", 15 if yoy >= 20 else (8 if yoy >= 0 else 0), 15, "n_rev_yoy", yoy)
+        gm = int(val("rev_growth_months") or 0)
+        add("f_rev_growth", 10 if gm >= 3 else (5 if gm >= 1 else 0), 10, "n_rev_growth", gm)
         hi = bool(val("rev_high"))
-        add("營收創高", 10 if hi else 0, 10, "創近一年新高" if hi else "未創近一年新高")
+        add("f_rev_high", 10 if hi else 0, 10, "n_rev_high_y" if hi else "n_rev_high_n")
 
-    total = sum(f["得分"] for f in factors)
-    full = sum(f["滿分"] for f in factors)
+    total = sum(f["got"] for f in factors)
+    full = sum(f["full"] for f in factors)
     score = round(total / full * 100) if full else 0
 
     if score >= 70:
-        grade, suggestion = "偏多", "技術與籌碼同步轉強,趨勢偏多,可留意;仍須注意大盤與停損。"
+        grade_key = "bullish"
     elif score >= 50:
-        grade, suggestion = "中性偏多", "部分指標轉強,留意能否持續;追高需謹慎。"
+        grade_key = "neutral_bull"
     elif score >= 30:
-        grade, suggestion = "中性偏弱", "多空訊號分歧,建議觀望、等待方向明確。"
+        grade_key = "neutral_bear"
     else:
-        grade, suggestion = "偏空", "多數指標轉弱,趨勢偏空,不宜貿然進場。"
+        grade_key = "bearish"
 
-    return {"score": score, "grade": grade, "suggestion": suggestion, "factors": factors}
+    return {"score": score, "grade_key": grade_key, "factors": factors}
 
 
-def get_price_history(bundle, stock_id, timeframe="日"):
-    """取單檔 K 線資料,依 timeframe(日/週/月)重新取樣,並附 MA5/20/60。"""
+def get_price_history(bundle, stock_id, timeframe="D"):
+    """取單檔 K 線資料,依 timeframe(D 日 / W 週 / M 月)重新取樣,並附 MA5/20/60。"""
     p = bundle["price"]
     p = p[p["stock_id"] == stock_id].sort_values("date").copy()
     if p.empty:
