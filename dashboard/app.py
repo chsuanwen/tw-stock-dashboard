@@ -137,40 +137,78 @@ logic = "AND" if "AND" in logic_label else "OR"
 st.sidebar.divider()
 
 conditions = []
-if st.sidebar.checkbox("站上均線", value=True):
+st.sidebar.caption("📌 勾選想要的條件即可(可全部不勾=看全部)。滑鼠移到每個條件上有說明。")
+
+st.sidebar.markdown("**技術面(股價/量)**")
+if st.sidebar.checkbox(
+        "站上均線", value=False,
+        help="收盤價站上均線,代表近期走勢偏多、買方較強。可選天期:5/10日=短線、"
+             "20日(月線)=波段、60日(季線)=中長期趨勢。篩出「正在走多頭」的股票。"):
     ma_period = st.sidebar.selectbox("　└ 均線周期(日)", MA_PERIODS, index=MA_PERIODS.index(20))
     conditions.append(("above_ma", {"period": ma_period}))
-if st.sidebar.checkbox("投信連續買超", value=True):
-    d = st.sidebar.number_input("　└ 投信連買天數 ≥", 1, 12, 3)
-    conditions.append(("trust", {"days": d}))
-if st.sidebar.checkbox("外資連續買超", value=False):
-    d = st.sidebar.number_input("　└ 外資連買天數 ≥", 1, 12, 3)
-    conditions.append(("foreign_days", {"days": d}))
-if st.sidebar.checkbox("外資最新買超(當日)", value=False):
-    conditions.append(("foreign_net", {}))
-if st.sidebar.checkbox("自營商連續買超", value=False):
-    d = st.sidebar.number_input("　└ 自營商連買天數 ≥", 1, 12, 3)
-    conditions.append(("dealer_days", {"days": d}))
-if st.sidebar.checkbox("自營商最新買超(當日)", value=False):
-    conditions.append(("dealer_net", {}))
-if st.sidebar.checkbox("三大法人合計買超(當日)", value=False):
-    conditions.append(("total_net", {}))
-if st.sidebar.checkbox("成交量放大(量增)", value=False):
+if st.sidebar.checkbox(
+        "成交量放大(量增)", value=False,
+        help="當日成交量明顯高於近期均量,代表市場關注度與資金進場增加(量先價行),"
+             "常見於發動或轉強初期。篩出「突然爆量、有人在買」的股票。"):
     w = st.sidebar.selectbox("　└ 對比均量(日)", VOL_WINDOWS, index=0)
     r = st.sidebar.slider("　└ 放大倍數 ≥", 1.0, 3.0, 1.5, 0.1)
     conditions.append(("volume", {"window": w, "ratio": r}))
-if st.sidebar.checkbox("突破 N 日新高", value=False):
+if st.sidebar.checkbox(
+        "突破 N 日新高", value=False,
+        help="收盤價創最近 N 日的新高,代表突破前波壓力、強勢表態。"
+             "篩出「剛突破、走勢轉強」的股票。"):
     w = st.sidebar.selectbox("　└ 區間天數", BREAKOUT_WINDOWS, index=0)
     conditions.append(("breakout", {"window": w}))
 
+st.sidebar.markdown("**籌碼面(三大法人)**")
+if st.sidebar.checkbox(
+        "投信連續買超", value=False,
+        help="投信=國內基金。它偏好基本面好、做波段,連續買進常被視為「波段轉強」訊號,"
+             "且有作帳行情題材。篩出「國內基金正在連續買」的股票。"):
+    d = st.sidebar.number_input("　└ 投信連買天數 ≥", 1, 12, 3)
+    conditions.append(("trust", {"days": d}))
+if st.sidebar.checkbox(
+        "外資連續買超", value=False,
+        help="外資=國際資金,部位大、影響盤面。連續買進代表國際資金看好,"
+             "是大型權值股重要的多方力道。篩出「外資連續買」的股票。"):
+    d = st.sidebar.number_input("　└ 外資連買天數 ≥", 1, 12, 3)
+    conditions.append(("foreign_days", {"days": d}))
+if st.sidebar.checkbox(
+        "外資最新買超(當日)", value=False,
+        help="只看「最近一個交易日」外資是否買超。比連買寬鬆,觀察當天外資態度。"):
+    conditions.append(("foreign_net", {}))
+if st.sidebar.checkbox(
+        "自營商連續買超", value=False,
+        help="自營商=券商自有資金,多為短線/避險操作,訊號參考性低於外資與投信,"
+             "適合搭配其他條件一起看。"):
+    d = st.sidebar.number_input("　└ 自營商連買天數 ≥", 1, 12, 3)
+    conditions.append(("dealer_days", {"days": d}))
+if st.sidebar.checkbox(
+        "自營商最新買超(當日)", value=False,
+        help="只看最近一個交易日自營商是否買超。"):
+    conditions.append(("dealer_net", {}))
+if st.sidebar.checkbox(
+        "三大法人合計買超(當日)", value=False,
+        help="外資+投信+自營商當日合計為買超,代表法人整體偏多,"
+             "比單看一隻法人更能反映法人對該股的整體態度。"):
+    conditions.append(("total_net", {}))
+
 st.sidebar.markdown("**基本面(月營收)**")
-if st.sidebar.checkbox("營收年增達標", value=False):
+if st.sidebar.checkbox(
+        "營收年增達標", value=False,
+        help="當月營收比去年同月成長達到設定的 %(去除淡旺季影響)。代表公司本業在成長,"
+             "是基本面轉強的指標。篩出「生意越做越大」的股票。"):
     v = st.sidebar.slider("　└ 營收年增 ≥ (%)", -20, 100, 10)
     conditions.append(("rev_yoy", {"min_yoy": v}))
-if st.sidebar.checkbox("營收連續成長", value=False):
+if st.sidebar.checkbox(
+        "營收連續成長", value=False,
+        help="營收年增「連續多個月」都是正的,代表成長有持續性而非曇花一現。"
+             "篩出「成長動能穩定」的股票。"):
     n = st.sidebar.number_input("　└ 連續成長 ≥ (月)", 1, 12, 3)
     conditions.append(("rev_growth", {"months": n}))
-if st.sidebar.checkbox("營收創近一年新高", value=False):
+if st.sidebar.checkbox(
+        "營收創近一年新高", value=False,
+        help="當月營收是近一年來最高,代表營運動能強勁、可能進入成長爆發期。"):
     conditions.append(("rev_high", {}))
 
 st.sidebar.divider()
