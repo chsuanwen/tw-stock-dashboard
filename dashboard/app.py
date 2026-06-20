@@ -98,7 +98,7 @@ st.sidebar.header("追蹤股池")
 universe = load_universe()
 industries = sorted(universe["industry"].unique()) if not universe.empty else []
 sel_inds = st.sidebar.multiselect(
-    "選擇產業(可多選;不選=用預設清單)", industries,
+    "選擇產業(可多選)", industries,
     help="選定產業後,系統只抓取並分析該產業的股票。")
 max_n = st.sidebar.slider("最多抓取檔數", 10, config.MAX_UNIVERSE, 60, 10,
                           help="即時抓取,檔數越多等待越久(三大法人為固定成本)。")
@@ -110,8 +110,8 @@ if sel_inds and not universe.empty:
     pool = pool[:max_n]
     pool_label = "、".join(sel_inds)
 else:
-    pool = list(config.STOCK_LIST)
-    pool_label = "預設清單"
+    pool = []
+    pool_label = "尚未選擇"
 st.sidebar.caption(f"目前股池:{pool_label}（{len(pool)} 檔）"
                    + ("　⚠️ 已截斷至上限" if pool_capped else ""))
 st.sidebar.divider()
@@ -171,6 +171,11 @@ if st.sidebar.button("🔄 立即重抓最新資料"):
 # ==========================================================================
 # 抓資料 + 算指標 + 套用條件
 # ==========================================================================
+if not pool:
+    st.info("👈 請先從左側「追蹤股池」**選擇產業**,並設定選股條件,"
+            "系統就會在這裡列出符合條件的標的與強勢股排名。")
+    st.stop()
+
 with st.spinner(f"正在抓取 {len(pool)} 檔股票資料(Yahoo / 證交所 / MOPS)…"
                 "(檔數多時首次需數十秒~數分鐘,之後快取秒開)"):
     try:
