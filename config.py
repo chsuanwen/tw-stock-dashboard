@@ -38,5 +38,12 @@ TWSE_T86_URL = "https://www.twse.com.tw/fund/T86"
 # 櫃買中心「三大法人買賣明細」端點(上櫃)。單一日期回傳全上櫃股。
 TPEX_INSTI_URL = "https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade"
 
+# 公開資訊觀測站(MOPS)月營收彙總靜態檔。market: sii(上市)/ otc(上櫃)。
+# 單一檔=某月份全市場;以 ROC 年份與月份組成。big5 編碼。
+MOPS_REVENUE_URL = "https://mopsov.twse.com.tw/nas/t21/{market}/t21sc03_{roc}_{month}_0.html"
+
+# 月營收往前抓幾個月(供 年增、連續成長月數、創新高 計算)
+REVENUE_MONTHS = 13
+
 # 快取時間(秒)。在這段時間內重複開啟/操作網頁都用暫存結果,不重抓。
 CACHE_TTL_SECONDS = 8 * 60 * 60

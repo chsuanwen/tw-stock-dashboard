@@ -5,7 +5,10 @@
 
 全程不寫任何檔案,資料只活在記憶體,算完即丟。
 """
+import re
 import time
+from datetime import date
+from io import StringIO
 
 import requests
 import pandas as pd
@@ -14,6 +17,13 @@ import yfinance as yf
 import config
 
 _HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+
+def _to_float(x):
+    try:
+        return float(str(x).replace(",", "").strip())
+    except (ValueError, AttributeError):
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -187,6 +197,56 @@ def fetch_bundle(stock_ids=None, progress_cb=None):
     )
 
     return {"stocks": stocks, "price": price, "inst": inst}
+
+
+def fetch_revenue(market="sii", months=None):
+    """抓 MOPS 月營收(含年增率 YoY),回傳全市場 DataFrame。
+
+    market: "sii"(上市)或 "otc"(上櫃)。
+    回傳欄位:stock_id, year, month, revenue(當月,仟元), yoy(去年同月增減 %)。
+    每個月一個檔(全市場),往前抓 months 個月以利算連續成長/創新高。
+    """
+    months = months or config.REVENUE_MONTHS
+    y, m = date.today().year, date.today().month
+    m -= 1  # 從上個月開始(本月通常尚未公布)
+    if m == 0:
+        y, m = y - 1, 12
+
+    rows, got, tries = [], 0, 0
+    session = requests.Session()
+    while got < months and tries < months + 4:
+        tries += 1
+        url = config.MOPS_REVENUE_URL.format(market=market, roc=y - 1911, month=m)
+        try:
+            r = session.get(url, headers=_HEADERS, timeout=30)
+            if r.status_code == 200 and len(r.content) > 3000:
+                txt = r.content.decode("big5", "ignore")
+                tables = pd.read_html(StringIO(txt), header=None)
+                added = 0
+                for t in tables:
+                    if t.shape[1] != 11:
+                        continue
+                    for _, row in t.iterrows():
+                        code = str(row.iloc[0]).strip()
+                        if not re.fullmatch(r"\d{4}", code):
+                            continue
+                        rows.append({
+                            "stock_id": code, "year": y, "month": m,
+                            "revenue": _to_int(row.iloc[2]),
+                            "yoy": _to_float(row.iloc[6]),
+                        })
+                        added += 1
+                if added:
+                    got += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 月營收抓取失敗 {url}: {e}")
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+        time.sleep(0.4)
+
+    return (pd.DataFrame(rows) if rows
+            else pd.DataFrame(columns=["stock_id", "year", "month", "revenue", "yoy"]))
 
 
 def fetch_single(stock_id):

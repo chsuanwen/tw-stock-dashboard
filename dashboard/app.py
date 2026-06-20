@@ -16,7 +16,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 import config
-from datasource import fetch_bundle, fetch_single
+from datasource import fetch_bundle, fetch_single, fetch_revenue
 from strategy.screener import (
     build_metrics, apply_filters, get_price_history, score_stock,
     MA_PERIODS, VOL_WINDOWS, BREAKOUT_WINDOWS,
@@ -35,6 +35,12 @@ def load_bundle():
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
 def load_single(code):
     return fetch_single(code)
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def load_revenue(market):
+    """月營收(MOPS)。月更新,快取 24 小時。market: sii(上市)/ otc(上櫃)。"""
+    return fetch_revenue(market)
 
 
 def quote_url(code, suffix=".TW"):
@@ -110,19 +116,31 @@ if st.sidebar.checkbox("突破 N 日新高", value=False):
     w = st.sidebar.selectbox("　└ 區間天數", BREAKOUT_WINDOWS, index=0)
     conditions.append(("breakout", {"window": w}))
 
+st.sidebar.markdown("**基本面(月營收)**")
+if st.sidebar.checkbox("營收年增達標", value=False):
+    v = st.sidebar.slider("　└ 營收年增 ≥ (%)", -20, 100, 10)
+    conditions.append(("rev_yoy", {"min_yoy": v}))
+if st.sidebar.checkbox("營收連續成長", value=False):
+    n = st.sidebar.number_input("　└ 連續成長 ≥ (月)", 1, 12, 3)
+    conditions.append(("rev_growth", {"months": n}))
+if st.sidebar.checkbox("營收創近一年新高", value=False):
+    conditions.append(("rev_high", {}))
+
 st.sidebar.divider()
 if st.sidebar.button("🔄 立即重抓最新資料"):
     load_bundle.clear()
+    load_revenue.clear()
     st.rerun()
 
 
 # ==========================================================================
 # 抓資料 + 算指標 + 套用條件
 # ==========================================================================
-with st.spinner("正在向 Yahoo 與證交所抓取最新資料…(首次約需數十秒,之後快取秒開)"):
+with st.spinner("正在向 Yahoo / 證交所 / MOPS 抓取最新資料…(首次約需數十秒,之後快取秒開)"):
     try:
         bundle = load_bundle()
-        metrics = build_metrics(bundle)
+        revenue_sii = load_revenue("sii")
+        metrics = build_metrics(bundle, revenue_sii)
     except Exception as e:  # noqa: BLE001
         st.error(f"抓取資料失敗,請稍後再試或檢查網路。\n\n{e}")
         st.stop()
@@ -145,6 +163,9 @@ cond_text = {
     "foreign_net": lambda p: "外資當日買超",
     "volume": lambda p: f"量>{p['ratio']}倍{p['window']}日均量",
     "breakout": lambda p: f"突破{p['window']}日新高",
+    "rev_yoy": lambda p: f"營收年增≥{p['min_yoy']}%",
+    "rev_growth": lambda p: f"營收連續成長≥{p['months']}月",
+    "rev_high": lambda p: "營收創近一年新高",
 }
 active_desc = "、".join(cond_text[k](p) for k, p in conditions) or "(未設條件,顯示全部)"
 st.caption(f"資料日期:{metrics['date'].max()}　|　追蹤 {len(metrics)} 檔　|　"
@@ -163,14 +184,18 @@ if not display.empty:
     display["量比5"] = (display["volume"] / display["vol_ma5"]).round(2)
     display["foreign_net"] = display["foreign_net"].apply(
         lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
+    display["營收年增"] = display["rev_yoy"].apply(
+        lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
 display = display.reindex(columns=[
     "stock_id", "name", "date", "close", "ma20",
-    "trust_buy_days", "foreign_buy_days", "foreign_net", "量比5", "個股", "新聞"])
+    "trust_buy_days", "foreign_buy_days", "foreign_net",
+    "營收年增", "rev_growth_months", "量比5", "個股", "新聞"])
 st.dataframe(
     display.rename(columns={
         "stock_id": "代號", "name": "名稱", "date": "資料日", "close": "收盤",
         "ma20": "月線(MA20)", "trust_buy_days": "投信連買(天)",
         "foreign_buy_days": "外資連買(天)", "foreign_net": "外資買賣超(股)",
+        "rev_growth_months": "營收連續成長(月)",
     }),
     use_container_width=True, hide_index=True, column_config=LINK_COLS,
 )
@@ -227,7 +252,9 @@ if code:
     if sbundle["price"].empty:
         st.warning(f"找不到代號「{code}」的資料,請確認代號是否正確(支援上市/上櫃)。")
     else:
-        smetrics = build_metrics(sbundle)
+        _ticker = sbundle["stocks"]["ticker"].iloc[0]
+        srevenue = load_revenue("otc" if _ticker.endswith(".TWO") else "sii")
+        smetrics = build_metrics(sbundle, srevenue)
         if smetrics.empty:
             st.warning("資料不足,無法分析。")
         else:
@@ -252,6 +279,11 @@ if code:
             m4.metric("資料日", str(row["date"]))
 
             st.info(f'**建議:** {sc["suggestion"]}　_（此為機械式指標量化,僅供參考,非投資建議）_')
+
+            if row.get("rev_yoy") is not None:
+                hi = "、創近一年新高 🔥" if row.get("rev_high") else ""
+                st.caption(f'最新月營收({row["rev_month"]}):年增 {row["rev_yoy"]:+.1f}%、'
+                           f'年增連續為正 {row["rev_growth_months"]} 個月{hi}')
 
             if sbundle["inst"].empty:
                 st.caption("⚠️ 查無此股三大法人資料,籌碼面項目以 0 計分。")

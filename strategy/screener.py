@@ -29,11 +29,35 @@ def _consecutive_buy_days(net_series):
     return days
 
 
-def build_metrics(bundle):
-    """彙整每檔股票的最新指標(以日線為準),回傳 DataFrame(一檔一列)。"""
+def _revenue_metrics(rv):
+    """由單檔月營收(已依年月排序)算 年增、連續成長月數、是否創高。"""
+    yoy = rv["yoy"].iloc[-1]
+    month = f'{int(rv["year"].iloc[-1])}/{int(rv["month"].iloc[-1]):02d}'
+    growth = 0
+    for v in rv["yoy"].iloc[::-1]:
+        if pd.notna(v) and v > 0:
+            growth += 1
+        else:
+            break
+    revs = rv["revenue"].dropna()
+    is_high = bool(len(revs) > 1 and revs.iloc[-1] >= revs.max())
+    return {
+        "rev_yoy": round(float(yoy), 2) if pd.notna(yoy) else None,
+        "rev_month": month,
+        "rev_growth_months": growth,
+        "rev_high": is_high,
+    }
+
+
+def build_metrics(bundle, revenue=None):
+    """彙整每檔股票的最新指標(以日線為準),回傳 DataFrame(一檔一列)。
+
+    revenue: 選用,datasource.fetch_revenue() 的回傳;提供時計算基本面(營收)指標。
+    """
     stocks = bundle["stocks"]
     price = bundle["price"]
     inst = bundle["inst"]
+    has_rev = revenue is not None and not revenue.empty
     name_map = dict(zip(stocks["stock_id"], stocks["name"])) if not stocks.empty else {}
 
     records = []
@@ -80,6 +104,14 @@ def build_metrics(bundle):
             rec["foreign_buy_days"] = 0
             rec["foreign_net"] = None
 
+        # 基本面:月營收年增 / 連續成長月數 / 是否創高
+        rec.update({"rev_yoy": None, "rev_month": None,
+                    "rev_growth_months": 0, "rev_high": False})
+        if has_rev:
+            rv = revenue[revenue["stock_id"] == sid].sort_values(["year", "month"])
+            if not rv.empty:
+                rec.update(_revenue_metrics(rv))
+
         records.append(rec)
 
     return pd.DataFrame(records)
@@ -113,6 +145,18 @@ def _cond_breakout(m, window=20):
     return m["close"] >= m[f"high{window}"]
 
 
+def _cond_rev_yoy(m, min_yoy=10):
+    return m["rev_yoy"].fillna(-9999) >= min_yoy
+
+
+def _cond_rev_growth(m, months=3):
+    return m["rev_growth_months"].fillna(0) >= months
+
+
+def _cond_rev_high(m):
+    return m["rev_high"].fillna(False)
+
+
 _CONDITIONS = {
     "above_ma": _cond_above_ma,
     "trust": _cond_trust,
@@ -120,6 +164,9 @@ _CONDITIONS = {
     "foreign_net": _cond_foreign_net,
     "volume": _cond_volume,
     "breakout": _cond_breakout,
+    "rev_yoy": _cond_rev_yoy,
+    "rev_growth": _cond_rev_growth,
+    "rev_high": _cond_rev_high,
 }
 
 
@@ -198,6 +245,19 @@ def score_stock(row):
     ok = fn is not None and fn > 0
     add("外資當日買超", 10 if ok else 0, 10,
         f"外資買超 {fn:,.0f} 股" if ok else "外資未買超")
+
+    # --- 基本面(僅在有月營收資料時計入)---
+    yoy = val("rev_yoy")
+    if yoy is not None:
+        g = 15 if yoy >= 20 else (8 if yoy >= 0 else 0)
+        add("營收年增", g, 15, f"營收年增 {yoy:+.1f}%")
+
+        gm = val("rev_growth_months") or 0
+        g = 10 if gm >= 3 else (5 if gm >= 1 else 0)
+        add("營收連續成長", g, 10, f"年增連續為正 {gm} 個月")
+
+        hi = bool(val("rev_high"))
+        add("營收創高", 10 if hi else 0, 10, "創近一年新高" if hi else "未創近一年新高")
 
     total = sum(f["得分"] for f in factors)
     full = sum(f["滿分"] for f in factors)
