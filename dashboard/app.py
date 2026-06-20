@@ -65,28 +65,40 @@ LINK_COLS = {
 
 
 def make_kline_fig(hist, timeframe):
+    # 依週期決定 x 軸日期格式:月→年/月,日/週→年/月/日
+    tickfmt = "%Y/%m" if timeframe == "月" else "%Y/%m/%d"
+    unit = {"日": "日", "週": "週", "月": "月"}[timeframe]
+
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.7, 0.3], vertical_spacing=0.03,
-        subplot_titles=(f"{timeframe}K 線 + 均線", "成交量"),
+        row_heights=[0.7, 0.3], vertical_spacing=0.05,
+        subplot_titles=(f"{timeframe}K 線 + 均線", f"成交量(每{unit})"),
     )
     fig.add_trace(go.Candlestick(
         x=hist["date"], open=hist["open"], high=hist["high"],
         low=hist["low"], close=hist["close"], name=f"{timeframe}K",
         increasing_line_color="red", decreasing_line_color="green",
+        xhoverformat=tickfmt,
     ), row=1, col=1)
     for ma, period, color in [("ma5", 5, "orange"), ("ma20", 20, "blue"), ("ma60", 60, "purple")]:
         fig.add_trace(go.Scatter(
-            x=hist["date"], y=hist[ma], name=f"MA{period}({period}{timeframe})",
+            x=hist["date"], y=hist[ma], name=f"MA{period}({period}{unit})",
             line=dict(width=1, color=color),
         ), row=1, col=1)
     fig.add_trace(go.Bar(
         x=hist["date"], y=hist["volume"], name="成交量", marker_color="lightgray",
+        hovertemplate="%{x|" + tickfmt + "}　成交量 %{y:,.0f} 股<extra></extra>",
     ), row=2, col=1)
+
     fig.update_layout(
-        height=600, xaxis_rangeslider_visible=False,
+        height=600, xaxis_rangeslider_visible=False, hovermode="x unified",
         legend=dict(orientation="h", y=1.02, yanchor="bottom"),
     )
+    # x 軸日期清楚標示;日線移除週末空檔讓 K 棒連續
+    fig.update_xaxes(tickformat=tickfmt, tickangle=-30, nticks=14, row=1, col=1)
+    fig.update_xaxes(tickformat=tickfmt, tickangle=-30, nticks=14, row=2, col=1)
+    if timeframe == "日":
+        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
     return fig
 
 
@@ -353,6 +365,19 @@ if code:
                 + f"[Goodinfo](https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={code})　｜　"
                 + f"[玩股網](https://www.wantgoo.com/stock/{code})　｜　"
                 + f"[公開資訊觀測站](https://mops.twse.com.tw/mops/web/t05st01?stockNo={code})"
+            )
+
+            # 本健檢各項數據的實際出處(資料來源)
+            insti_src = (
+                "[證交所 三大法人(T86)](https://www.twse.com.tw/zh/trading/foreign/t86.html)"
+                if suffix == ".TW" else
+                "[櫃買中心 三大法人](https://www.tpex.org.tw/zh-tw/mainboard/trading/major-institutional/day.html)"
+            )
+            st.markdown(
+                "**📚 資料來源(本健檢數據出處):** "
+                + f"價量/K線→[Yahoo 股市]({quote_url(code, suffix)})　｜　"
+                + f"三大法人→{insti_src}　｜　"
+                + "月營收→[公開資訊觀測站(MOPS)](https://mops.twse.com.tw/mops/#/web/t05st10_ifrs)"
             )
 
             tf2 = st.radio("時間週期", ["日", "週", "月"], horizontal=True, index=0, key="single_tf")
