@@ -271,12 +271,14 @@ if st.sidebar.checkbox(
     conditions.append(("rev_high", {}))
 
 st.sidebar.divider()
-if st.sidebar.button("🔄 立即重抓最新資料"):
+bc1, bc2 = st.sidebar.columns(2)
+if bc1.button("🔄 重抓資料", use_container_width=True,
+              help="立即重抓最新資料:清除快取並重新抓取 Yahoo / 證交所 / MOPS 的最新數據。"):
     load_bundle.clear()
     load_revenue.clear()
     st.rerun()
-st.sidebar.button("🧹 清除目前選擇條件", on_click=clear_conditions, use_container_width=True,
-                  help="把所有已勾選的選股條件取消,回到全部未勾的狀態。")
+bc2.button("🧹 清除條件", on_click=clear_conditions, use_container_width=True,
+           help="清除目前選擇條件:把所有已勾選的選股條件取消,回到全部未勾的狀態。")
 
 
 # ==========================================================================
