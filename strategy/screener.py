@@ -93,16 +93,20 @@ def build_metrics(bundle, revenue=None):
             v = p["close"].rolling(n).max().iloc[-1]
             rec[f"high{n}"] = float(v) if pd.notna(v) else None
 
-        # 籌碼面:投信 / 外資 連買天數 + 外資最新買賣超
+        # 籌碼面:三大法人(外資/投信/自營商)連買天數、最新淨額、合計
         ins = inst[inst["stock_id"] == sid].sort_values("date")
         if not ins.empty:
+            last_i = ins.iloc[-1]
             rec["trust_buy_days"] = _consecutive_buy_days(ins["trust_net"])
             rec["foreign_buy_days"] = _consecutive_buy_days(ins["foreign_net"])
-            rec["foreign_net"] = int(ins["foreign_net"].iloc[-1])
+            rec["dealer_buy_days"] = _consecutive_buy_days(ins["dealer_net"])
+            rec["foreign_net"] = int(last_i["foreign_net"])
+            rec["trust_net"] = int(last_i["trust_net"])
+            rec["dealer_net"] = int(last_i["dealer_net"])
+            rec["total_net"] = int(last_i["foreign_net"] + last_i["trust_net"] + last_i["dealer_net"])
         else:
-            rec["trust_buy_days"] = 0
-            rec["foreign_buy_days"] = 0
-            rec["foreign_net"] = None
+            rec["trust_buy_days"] = rec["foreign_buy_days"] = rec["dealer_buy_days"] = 0
+            rec["foreign_net"] = rec["trust_net"] = rec["dealer_net"] = rec["total_net"] = None
 
         # 基本面:月營收年增 / 連續成長月數 / 是否創高
         rec.update({"rev_yoy": None, "rev_month": None,
@@ -137,6 +141,18 @@ def _cond_foreign_net(m):
     return m["foreign_net"].fillna(0) > 0
 
 
+def _cond_dealer_days(m, days=3):
+    return m["dealer_buy_days"] >= days
+
+
+def _cond_dealer_net(m):
+    return m["dealer_net"].fillna(0) > 0
+
+
+def _cond_total_net(m):
+    return m["total_net"].fillna(0) > 0
+
+
 def _cond_volume(m, window=5, ratio=1.5):
     return m["volume"] > ratio * m[f"vol_ma{window}"]
 
@@ -162,6 +178,9 @@ _CONDITIONS = {
     "trust": _cond_trust,
     "foreign_days": _cond_foreign_days,
     "foreign_net": _cond_foreign_net,
+    "dealer_days": _cond_dealer_days,
+    "dealer_net": _cond_dealer_net,
+    "total_net": _cond_total_net,
     "volume": _cond_volume,
     "breakout": _cond_breakout,
     "rev_yoy": _cond_rev_yoy,
@@ -245,6 +264,16 @@ def score_stock(row):
     ok = fn is not None and fn > 0
     add("外資當日買超", 10 if ok else 0, 10,
         f"外資買超 {fn:,.0f} 股" if ok else "外資未買超")
+
+    dn = val("dealer_net")
+    ok = dn is not None and dn > 0
+    add("自營商當日買超", 5 if ok else 0, 5,
+        f"自營商買超 {dn:,.0f} 股" if ok else "自營商未買超")
+
+    tn = val("total_net")
+    ok = tn is not None and tn > 0
+    add("三大法人合計買超", 10 if ok else 0, 10,
+        f"三大法人合計買超 {tn:,.0f} 股" if ok else "三大法人合計未買超")
 
     # --- 基本面(僅在有月營收資料時計入)---
     yoy = val("rev_yoy")

@@ -108,6 +108,13 @@ if st.sidebar.checkbox("外資連續買超", value=False):
     conditions.append(("foreign_days", {"days": d}))
 if st.sidebar.checkbox("外資最新買超(當日)", value=False):
     conditions.append(("foreign_net", {}))
+if st.sidebar.checkbox("自營商連續買超", value=False):
+    d = st.sidebar.number_input("　└ 自營商連買天數 ≥", 1, 12, 3)
+    conditions.append(("dealer_days", {"days": d}))
+if st.sidebar.checkbox("自營商最新買超(當日)", value=False):
+    conditions.append(("dealer_net", {}))
+if st.sidebar.checkbox("三大法人合計買超(當日)", value=False):
+    conditions.append(("total_net", {}))
 if st.sidebar.checkbox("成交量放大(量增)", value=False):
     w = st.sidebar.selectbox("　└ 對比均量(日)", VOL_WINDOWS, index=0)
     r = st.sidebar.slider("　└ 放大倍數 ≥", 1.0, 3.0, 1.5, 0.1)
@@ -161,6 +168,9 @@ cond_text = {
     "trust": lambda p: f"投信連買≥{p['days']}天",
     "foreign_days": lambda p: f"外資連買≥{p['days']}天",
     "foreign_net": lambda p: "外資當日買超",
+    "dealer_days": lambda p: f"自營商連買≥{p['days']}天",
+    "dealer_net": lambda p: "自營商當日買超",
+    "total_net": lambda p: "三大法人合計買超",
     "volume": lambda p: f"量>{p['ratio']}倍{p['window']}日均量",
     "breakout": lambda p: f"突破{p['window']}日新高",
     "rev_yoy": lambda p: f"營收年增≥{p['min_yoy']}%",
@@ -184,17 +194,21 @@ if not display.empty:
     display["量比5"] = (display["volume"] / display["vol_ma5"]).round(2)
     display["foreign_net"] = display["foreign_net"].apply(
         lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
+    display["三大法人合計"] = display["total_net"].apply(
+        lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
     display["營收年增"] = display["rev_yoy"].apply(
         lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
 display = display.reindex(columns=[
     "stock_id", "name", "date", "close", "ma20",
-    "trust_buy_days", "foreign_buy_days", "foreign_net",
+    "trust_buy_days", "foreign_buy_days", "dealer_buy_days",
+    "foreign_net", "三大法人合計",
     "營收年增", "rev_growth_months", "量比5", "個股", "新聞"])
 st.dataframe(
     display.rename(columns={
         "stock_id": "代號", "name": "名稱", "date": "資料日", "close": "收盤",
         "ma20": "月線(MA20)", "trust_buy_days": "投信連買(天)",
-        "foreign_buy_days": "外資連買(天)", "foreign_net": "外資買賣超(股)",
+        "foreign_buy_days": "外資連買(天)", "dealer_buy_days": "自營商連買(天)",
+        "foreign_net": "外資買賣超(股)", "三大法人合計": "三大法人合計(股)",
         "rev_growth_months": "營收連續成長(月)",
     }),
     use_container_width=True, hide_index=True, column_config=LINK_COLS,
