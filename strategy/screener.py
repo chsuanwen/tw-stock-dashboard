@@ -51,6 +51,13 @@ def build_metrics(bundle):
             "close": round(close, 2),
             "volume": volume,
         }
+        # N 個交易日前到今天的漲跌幅(%):強勢股排名用
+        closes = p["close"].reset_index(drop=True)
+        for n in (3, 30):
+            if len(closes) > n and closes.iloc[-1 - n]:
+                rec[f"ret_{n}d"] = round((closes.iloc[-1] / closes.iloc[-1 - n] - 1) * 100, 2)
+            else:
+                rec[f"ret_{n}d"] = None
         # 各周期均線、均量、區間最高收盤
         for n in MA_PERIODS:
             v = p["close"].rolling(n).mean().iloc[-1]

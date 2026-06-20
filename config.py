@@ -32,8 +32,11 @@ PRICE_START_DATE = "2024-06-01"
 # 三大法人:回抓最近幾個交易日即可(夠算投信連買與最新外資買超)
 INST_LOOKBACK_DAYS = 12
 
-# 證交所「三大法人買賣超日報(T86)」端點。單一日期會回傳全市場所有股票。
+# 證交所「三大法人買賣超日報(T86)」端點。單一日期會回傳全市場所有股票(上市)。
 TWSE_T86_URL = "https://www.twse.com.tw/fund/T86"
+
+# 櫃買中心「三大法人買賣明細」端點(上櫃)。單一日期回傳全上櫃股。
+TPEX_INSTI_URL = "https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade"
 
 # 快取時間(秒)。在這段時間內重複開啟/操作網頁都用暫存結果,不重抓。
 CACHE_TTL_SECONDS = 8 * 60 * 60

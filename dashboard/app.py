@@ -1,11 +1,12 @@
 """Streamlit Dashboard(即時抓 + 快取、不落地版)。
 
-資料來源:Yahoo 股市(價量)+ 臺灣證券交易所(三大法人)。
-功能:可組合條件選股(AND/OR、即時更新)、日/週/月 K 線、單檔健檢評分。
+資料來源:Yahoo 股市(價量)+ 臺灣證券交易所(上市三大法人)+ 櫃買中心(上櫃三大法人)。
+功能:可組合條件選股(AND/OR)、強勢股排名、日/週/月 K 線、單檔健檢評分、相關連結/新聞。
 啟動:streamlit run dashboard/app.py
 """
 import os
 import sys
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,7 +24,7 @@ from strategy.screener import (
 
 st.set_page_config(page_title="台股策略選股", layout="wide")
 st.title("📈 台股策略選股 Dashboard")
-st.caption("資料來源:Yahoo 股市(價量)＋ 臺灣證券交易所(三大法人)。即時抓取,未儲存。")
+st.caption("資料來源:Yahoo 股市(價量)＋ 臺灣證券交易所/櫃買中心(三大法人)。即時抓取,未儲存。")
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
@@ -36,8 +37,23 @@ def load_single(code):
     return fetch_single(code)
 
 
+def quote_url(code, suffix=".TW"):
+    return f"https://tw.stock.yahoo.com/quote/{code}{suffix}"
+
+
+def news_url(code, name=""):
+    q = urllib.parse.quote(f"{code} {name} 股票".strip())
+    return f"https://news.google.com/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+
+
+# 結果/排名表共用的連結欄設定
+LINK_COLS = {
+    "個股": st.column_config.LinkColumn("個股", display_text="🔗 Yahoo"),
+    "新聞": st.column_config.LinkColumn("新聞", display_text="📰 新聞"),
+}
+
+
 def make_kline_fig(hist, timeframe):
-    """以 hist(含 ma5/20/60)畫 K 線 + 均線 + 成交量。"""
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.7, 0.3], vertical_spacing=0.03,
@@ -64,7 +80,7 @@ def make_kline_fig(hist, timeframe):
 
 
 # ==========================================================================
-# 側欄:條件面板(勾選 → 展開參數),AND/OR 切換
+# 側欄:條件面板 + AND/OR
 # ==========================================================================
 st.sidebar.header("選股條件")
 logic_label = st.sidebar.radio(
@@ -115,6 +131,11 @@ if metrics.empty:
     st.warning("抓不到資料,請稍候再按「立即重抓最新資料」。")
     st.stop()
 
+# 預先備好每檔的連結欄
+metrics = metrics.copy()
+metrics["個股"] = metrics["stock_id"].apply(quote_url)
+metrics["新聞"] = metrics.apply(lambda r: news_url(r["stock_id"], r["name"]), axis=1)
+
 result = apply_filters(metrics, conditions, logic)
 
 cond_text = {
@@ -134,7 +155,7 @@ c1.metric("追蹤股票數", len(metrics))
 c2.metric("符合條件", len(result))
 
 # ==========================================================================
-# 篩選結果表
+# 篩選結果表(含個股 / 新聞連結)
 # ==========================================================================
 st.subheader("✅ 符合條件的標的")
 display = result.copy()
@@ -142,19 +163,38 @@ if not display.empty:
     display["量比5"] = (display["volume"] / display["vol_ma5"]).round(2)
     display["foreign_net"] = display["foreign_net"].apply(
         lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
-    cols = ["stock_id", "name", "date", "close", "ma20",
-            "trust_buy_days", "foreign_buy_days", "foreign_net", "量比5"]
-    display = display[cols]
+display = display.reindex(columns=[
+    "stock_id", "name", "date", "close", "ma20",
+    "trust_buy_days", "foreign_buy_days", "foreign_net", "量比5", "個股", "新聞"])
 st.dataframe(
     display.rename(columns={
         "stock_id": "代號", "name": "名稱", "date": "資料日", "close": "收盤",
         "ma20": "月線(MA20)", "trust_buy_days": "投信連買(天)",
         "foreign_buy_days": "外資連買(天)", "foreign_net": "外資買賣超(股)",
     }),
-    use_container_width=True, hide_index=True,
+    use_container_width=True, hide_index=True, column_config=LINK_COLS,
 )
 
+# ==========================================================================
+# 🏆 強勢股排名(3日 / 30日 漲幅)
+# ==========================================================================
+st.subheader("🏆 強勢股排名(依區間漲幅)")
+period = st.radio("排名區間", ["3 日", "30 日"], horizontal=True, index=1,
+                  help="以 N 個交易日前到今天的收盤價漲跌幅排序。")
+col = "ret_3d" if period.startswith("3 ") else "ret_30d"
+rank = metrics[["stock_id", "name", "close", col, "個股", "新聞"]].dropna(subset=[col]).copy()
+rank = rank.sort_values(col, ascending=False).reset_index(drop=True)
+rank.insert(0, "名次", rank.index + 1)
+rank["漲跌幅"] = rank[col].apply(lambda v: f"{v:+.2f}%")
+rank = rank[["名次", "stock_id", "name", "close", "漲跌幅", "個股", "新聞"]]
+st.dataframe(
+    rank.rename(columns={"stock_id": "代號", "name": "名稱", "close": "收盤"}),
+    use_container_width=True, hide_index=True, column_config=LINK_COLS,
+)
+
+# ==========================================================================
 # 清單內個股線圖
+# ==========================================================================
 st.subheader("📊 清單內個股技術線圖")
 col_a, col_b = st.columns([3, 2])
 options = result["stock_id"].tolist() if not result.empty else metrics["stock_id"].tolist()
@@ -170,11 +210,11 @@ if sel:
 
 
 # ==========================================================================
-# 🔎 個股健檢:輸入任意代號 → 資訊 + 評分 + 建議 + 連結
+# 🔎 個股健檢:輸入任意代號 → 資訊 + 評分 + 建議 + 連結 + 新聞
 # ==========================================================================
 st.divider()
 st.subheader("🔎 個股健檢(輸入任意代號)")
-code = st.text_input("輸入股票代號(例:2330、2317、6446)", value="").strip()
+code = st.text_input("輸入股票代號(例:2330、2317、6488)", value="").strip()
 
 if code:
     with st.spinner(f"抓取 {code} 的資料中…(約需 10~20 秒)"):
@@ -195,8 +235,8 @@ if code:
             sc = score_stock(row)
             name = sbundle["stocks"]["name"].iloc[0]
             ticker = sbundle["stocks"]["ticker"].iloc[0]
+            suffix = ".TWO" if ticker.endswith(".TWO") else ".TW"
 
-            # 漲跌
             hp = get_price_history(sbundle, code, "日")
             chg = chgpct = None
             if len(hp) >= 2:
@@ -214,23 +254,22 @@ if code:
             st.info(f'**建議:** {sc["suggestion"]}　_（此為機械式指標量化,僅供參考,非投資建議）_')
 
             if sbundle["inst"].empty:
-                st.caption("⚠️ 此股無證交所三大法人資料(可能為上櫃股),籌碼面項目以 0 計分。")
+                st.caption("⚠️ 查無此股三大法人資料,籌碼面項目以 0 計分。")
 
-            # 評分明細
             st.markdown("**評分明細**")
             st.dataframe(pd.DataFrame(sc["factors"]),
                          use_container_width=True, hide_index=True)
 
-            # 外部連結
             st.markdown(
-                "**外部資源:** "
-                + f"[Yahoo 股市](https://tw.stock.yahoo.com/quote/{ticker})　｜　"
+                "**相關連結:** "
+                + f"[Yahoo 股市]({quote_url(code, suffix)})　｜　"
+                + f"[📰 即時新聞]({news_url(code, name)})　｜　"
+                + f"[Yahoo 個股新聞](https://tw.stock.yahoo.com/quote/{ticker}/news)　｜　"
                 + f"[Goodinfo](https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={code})　｜　"
                 + f"[玩股網](https://www.wantgoo.com/stock/{code})　｜　"
                 + f"[公開資訊觀測站](https://mops.twse.com.tw/mops/web/t05st01?stockNo={code})"
             )
 
-            # 線圖(日/週/月)
             tf2 = st.radio("時間週期", ["日", "週", "月"], horizontal=True, index=0, key="single_tf")
             h2 = get_price_history(sbundle, code, tf2)
             if not h2.empty:

@@ -101,6 +101,38 @@ def _fetch_t86(date_yyyymmdd, session):
     return out
 
 
+def _fetch_tpex_insti(date_yyyymmdd, session):
+    """抓某交易日「上櫃」三大法人買賣超(櫃買中心),回傳 {stock_id: {...}}。
+
+    欄位固定:0代號 1名稱 / 4外資(不含自營)買賣超 / 13投信買賣超 / 22自營商合計買賣超。
+    """
+    # TPEx 日期參數格式為西元 YYYY/MM/DD
+    d = f"{date_yyyymmdd[:4]}/{date_yyyymmdd[4:6]}/{date_yyyymmdd[6:]}"
+    params = {"type": "Daily", "sect": "EW", "date": d, "response": "json"}
+    try:
+        r = session.get(config.TPEX_INSTI_URL, params=params, headers=_HEADERS, timeout=30)
+        r.raise_for_status()
+        tables = r.json().get("tables", [])
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] TPEx 三大法人抓取失敗 {date_yyyymmdd}: {e}")
+        return {}
+    if not tables or not tables[0].get("data"):
+        return {}
+
+    out = {}
+    for row in tables[0]["data"]:
+        if len(row) < 23:
+            continue
+        sid = row[0].strip()
+        out[sid] = {
+            "name": row[1].strip(),
+            "foreign": _to_int(row[4]),
+            "trust": _to_int(row[13]),
+            "dealer": _to_int(row[22]),
+        }
+    return out
+
+
 # --------------------------------------------------------------------------
 # 主入口
 # --------------------------------------------------------------------------
@@ -175,12 +207,14 @@ def fetch_single(stock_id):
     if price.empty:
         return {"stocks": pd.DataFrame(), "price": price, "inst": pd.DataFrame()}
 
-    # 2) 三大法人:用實際交易日回抓 T86 並過濾此代號(僅上市有)
+    # 2) 三大法人:依上市/上櫃路由到 證交所(T86) 或 櫃買中心(TPEx)
+    is_otc = used_suffix == ".TWO"
+    fetch_insti = _fetch_tpex_insti if is_otc else _fetch_t86
     inst_rows, name = [], stock_id
     dates = sorted(price["date"].dt.strftime("%Y%m%d").unique())[-config.INST_LOOKBACK_DAYS:]
     session = requests.Session()
     for d in dates:
-        rec = _fetch_t86(d, session).get(stock_id)
+        rec = fetch_insti(d, session).get(stock_id)
         if rec:
             name = rec["name"]
             inst_rows.append({
