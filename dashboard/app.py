@@ -164,6 +164,12 @@ def apply_preset(on_keys, settings=None):
         st.session_state[_k] = _v
 
 
+def clear_conditions():
+    """清除所有已勾選的條件(用 on_click 回呼,在元件建立前執行才不會報錯)。"""
+    for _k in COND_KEYS:
+        st.session_state[_k] = False
+
+
 st.sidebar.markdown("**🎯 一鍵策略範本**")
 pc1, pc2 = st.sidebar.columns(2)
 if pc1.button("⚡ 強勢股", use_container_width=True,
@@ -269,6 +275,8 @@ if st.sidebar.button("🔄 立即重抓最新資料"):
     load_bundle.clear()
     load_revenue.clear()
     st.rerun()
+st.sidebar.button("🧹 清除目前選擇條件", on_click=clear_conditions, use_container_width=True,
+                  help="把所有已勾選的選股條件取消,回到全部未勾的狀態。")
 
 
 # ==========================================================================
