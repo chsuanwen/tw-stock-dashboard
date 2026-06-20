@@ -12,10 +12,12 @@ _MONTH_RULE = "ME" if _PV >= (2, 2) else "M"
 _WEEK_RULE = "W"
 TIMEFRAMES = {"日": None, "週": _WEEK_RULE, "月": _MONTH_RULE}
 
-# 可選的均線 / 均量 / 突破周期(供 UI 與指標預先計算)
+# 可選的均線 / 均量 周期(供 UI 與指標預先計算)
 MA_PERIODS = [5, 10, 20, 60]
 VOL_WINDOWS = [5, 20]
-BREAKOUT_WINDOWS = [20, 60]
+# 突破新高的天數改為使用者自由輸入(預設值與上限)
+BREAKOUT_DEFAULT = 20
+BREAKOUT_MAX = 250
 
 
 def _consecutive_buy_days(net_series):
@@ -89,9 +91,16 @@ def build_metrics(bundle, revenue=None):
         for n in VOL_WINDOWS:
             v = p["volume"].rolling(n).mean().iloc[-1]
             rec[f"vol_ma{n}"] = float(v) if pd.notna(v) else None
-        for n in BREAKOUT_WINDOWS:
-            v = p["close"].rolling(n).max().iloc[-1]
-            rec[f"high{n}"] = float(v) if pd.notna(v) else None
+        # 今天收盤是「最近幾天」以來的新高(從今天往回數,連續幾天收盤比今天低)
+        # 支援任意 N:突破 N 日新高 ⟺ new_high_days >= N
+        today_close = closes.iloc[-1]
+        nh = 1
+        for prev in closes.iloc[-2::-1]:
+            if prev < today_close:
+                nh += 1
+            else:
+                break
+        rec["new_high_days"] = nh
 
         # 籌碼面:三大法人(外資/投信/自營商)連買天數、最新淨額、合計
         ins = inst[inst["stock_id"] == sid].sort_values("date")
@@ -158,7 +167,7 @@ def _cond_volume(m, window=5, ratio=1.5):
 
 
 def _cond_breakout(m, window=20):
-    return m["close"] >= m[f"high{window}"]
+    return m["new_high_days"].fillna(1) >= window
 
 
 def _cond_rev_yoy(m, min_yoy=10):
@@ -247,9 +256,10 @@ def score_stock(row):
     ok = vol is not None and vol_ma5 is not None and vol > 1.2 * vol_ma5
     add("量能放大", 10 if ok else 0, 10, "量>1.2倍5日均量" if ok else "量能未明顯放大")
 
-    high20 = val("high20")
-    ok = close is not None and high20 is not None and close >= high20
-    add("突破20日新高", 10 if ok else 0, 10, "創20日新高" if ok else "未創20日新高")
+    nh = val("new_high_days") or 1
+    ok = nh >= 20
+    add("突破20日新高", 10 if ok else 0, 10,
+        f"創 {nh} 日新高" if ok else f"近高僅 {nh} 日(未達20日)")
 
     # --- 籌碼面 ---
     td = val("trust_buy_days") or 0

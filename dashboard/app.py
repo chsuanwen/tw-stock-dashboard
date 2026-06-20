@@ -19,7 +19,7 @@ import config
 from datasource import fetch_bundle, fetch_single, fetch_revenue, fetch_universe
 from strategy.screener import (
     build_metrics, apply_filters, get_price_history, score_stock,
-    MA_PERIODS, VOL_WINDOWS, BREAKOUT_WINDOWS,
+    MA_PERIODS, VOL_WINDOWS, BREAKOUT_DEFAULT, BREAKOUT_MAX,
 )
 
 st.set_page_config(page_title="台股策略選股", layout="wide")
@@ -157,8 +157,10 @@ if st.sidebar.checkbox(
         "突破 N 日新高", value=False,
         help="收盤價創最近 N 日的新高,代表突破前波壓力、強勢表態。"
              "篩出「剛突破、走勢轉強」的股票。"):
-    w = st.sidebar.selectbox("　└ 區間天數", BREAKOUT_WINDOWS, index=0)
-    conditions.append(("breakout", {"window": w}))
+    w = st.sidebar.number_input("　└ 區間天數(可自由輸入)", 5, BREAKOUT_MAX, BREAKOUT_DEFAULT,
+                                help="例:20=月新高、60=季新高、120=半年新高。"
+                                     "受可用歷史約一年(~250 交易日)限制。")
+    conditions.append(("breakout", {"window": int(w)}))
 
 st.sidebar.markdown("**籌碼面(三大法人)**")
 if st.sidebar.checkbox(
