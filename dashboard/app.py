@@ -16,7 +16,9 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 import config
-from datasource import fetch_bundle, fetch_single, fetch_revenue, fetch_universe
+from datasource import (
+    fetch_bundle, fetch_single, fetch_revenue, fetch_universe, fetch_index_returns,
+)
 from strategy.screener import (
     build_metrics, apply_filters, get_price_history, score_stock,
     MA_PERIODS, VOL_WINDOWS, BREAKOUT_DEFAULT, BREAKOUT_MAX,
@@ -35,6 +37,11 @@ def load_bundle(stock_ids):
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def load_universe():
     return fetch_universe()
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def load_index_returns():
+    return fetch_index_returns()
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
@@ -137,79 +144,123 @@ logic = "AND" if "AND" in logic_label else "OR"
 st.sidebar.divider()
 
 conditions = []
-st.sidebar.caption("📌 勾選想要的條件即可(可全部不勾=看全部)。滑鼠移到每個條件上有說明。")
+
+# 條件勾選狀態用 session_state 保存,讓「一鍵範本」能程式化設定
+COND_KEYS = [
+    "c_above_ma", "c_ma_bull", "c_volume", "c_breakout", "c_rs",
+    "c_trust", "c_foreign_days", "c_foreign_net",
+    "c_dealer_days", "c_dealer_net", "c_total_net",
+    "c_rev_yoy", "c_rev_growth", "c_rev_high",
+]
+for _k in COND_KEYS:
+    st.session_state.setdefault(_k, False)
+st.session_state.setdefault("p_rev_yoy", 10)
+
+
+def apply_preset(on_keys, settings=None):
+    for _k in COND_KEYS:
+        st.session_state[_k] = _k in on_keys
+    for _k, _v in (settings or {}).items():
+        st.session_state[_k] = _v
+
+
+st.sidebar.markdown("**🎯 一鍵策略範本**")
+pc1, pc2 = st.sidebar.columns(2)
+if pc1.button("⚡ 強勢股", use_container_width=True,
+              help="動能型:站上均線+均線多頭排列+量增+突破新高+三大法人合計買超+贏大盤"):
+    apply_preset(["c_above_ma", "c_ma_bull", "c_volume", "c_breakout", "c_total_net", "c_rs"])
+    st.rerun()
+if pc2.button("🌱 成長股", use_container_width=True,
+              help="業績型:營收年增>20%+營收連續成長+營收創新高+站上均線+投信連買"):
+    apply_preset(["c_rev_yoy", "c_rev_growth", "c_rev_high", "c_above_ma", "c_trust"],
+                 {"p_rev_yoy": 20})
+    st.rerun()
+st.sidebar.caption("📌 可按範本一鍵套用,或自行勾選。滑鼠移到條件上有說明。")
 
 st.sidebar.markdown("**技術面(股價/量)**")
 if st.sidebar.checkbox(
-        "站上均線", value=False,
+        "站上均線", key="c_above_ma",
         help="收盤價站上均線,代表近期走勢偏多、買方較強。可選天期:5/10日=短線、"
              "20日(月線)=波段、60日(季線)=中長期趨勢。篩出「正在走多頭」的股票。"):
     ma_period = st.sidebar.selectbox("　└ 均線周期(日)", MA_PERIODS, index=MA_PERIODS.index(20))
     conditions.append(("above_ma", {"period": ma_period}))
 if st.sidebar.checkbox(
-        "成交量放大(量增)", value=False,
+        "均線多頭排列", key="c_ma_bull",
+        help="短中長期均線由上而下排好(5MA>20MA>60MA),代表趨勢全面向上、呈攻擊隊形,"
+             "是強勢股的典型型態。篩出「趨勢全面轉強」的股票。"):
+    conditions.append(("ma_bull", {}))
+if st.sidebar.checkbox(
+        "成交量放大(量增)", key="c_volume",
         help="當日成交量明顯高於近期均量,代表市場關注度與資金進場增加(量先價行),"
              "常見於發動或轉強初期。篩出「突然爆量、有人在買」的股票。"):
     w = st.sidebar.selectbox("　└ 對比均量(日)", VOL_WINDOWS, index=0)
     r = st.sidebar.slider("　└ 放大倍數 ≥", 1.0, 3.0, 1.5, 0.1)
     conditions.append(("volume", {"window": w, "ratio": r}))
 if st.sidebar.checkbox(
-        "突破 N 日新高", value=False,
+        "突破 N 日新高", key="c_breakout",
         help="收盤價創最近 N 日的新高,代表突破前波壓力、強勢表態。"
              "篩出「剛突破、走勢轉強」的股票。"):
     w = st.sidebar.number_input("　└ 區間天數(可自由輸入)", 5, BREAKOUT_MAX, BREAKOUT_DEFAULT,
                                 help="例:20=月新高、60=季新高、120=半年新高。"
                                      "受可用歷史約一年(~250 交易日)限制。")
     conditions.append(("breakout", {"window": int(w)}))
+if st.sidebar.checkbox(
+        "相對強度(贏大盤)", key="c_rs",
+        help="個股漲幅扣掉大盤(加權指數)同期漲幅 > 門檻,代表比大盤強(大盤跌它抗跌、"
+             "大盤漲它更會噴)。是判斷強勢股的核心指標。篩出「比大盤強」的股票。"):
+    rs_p = st.sidebar.radio("　└ 比較區間", [3, 30], index=1, horizontal=True,
+                            format_func=lambda x: f"{x}日", key="p_rs_period")
+    rs_min = st.sidebar.slider("　└ 至少贏大盤 (%)", -10, 30, 0, key="p_rs_min")
+    conditions.append(("rs", {"period": rs_p, "min_rs": rs_min}))
 
 st.sidebar.markdown("**籌碼面(三大法人)**")
 if st.sidebar.checkbox(
-        "投信連續買超", value=False,
+        "投信連續買超", key="c_trust",
         help="投信=國內基金。它偏好基本面好、做波段,連續買進常被視為「波段轉強」訊號,"
              "且有作帳行情題材。篩出「國內基金正在連續買」的股票。"):
     d = st.sidebar.number_input("　└ 投信連買天數 ≥", 1, 12, 3)
     conditions.append(("trust", {"days": d}))
 if st.sidebar.checkbox(
-        "外資連續買超", value=False,
+        "外資連續買超", key="c_foreign_days",
         help="外資=國際資金,部位大、影響盤面。連續買進代表國際資金看好,"
              "是大型權值股重要的多方力道。篩出「外資連續買」的股票。"):
     d = st.sidebar.number_input("　└ 外資連買天數 ≥", 1, 12, 3)
     conditions.append(("foreign_days", {"days": d}))
 if st.sidebar.checkbox(
-        "外資最新買超(當日)", value=False,
+        "外資最新買超(當日)", key="c_foreign_net",
         help="只看「最近一個交易日」外資是否買超。比連買寬鬆,觀察當天外資態度。"):
     conditions.append(("foreign_net", {}))
 if st.sidebar.checkbox(
-        "自營商連續買超", value=False,
+        "自營商連續買超", key="c_dealer_days",
         help="自營商=券商自有資金,多為短線/避險操作,訊號參考性低於外資與投信,"
              "適合搭配其他條件一起看。"):
     d = st.sidebar.number_input("　└ 自營商連買天數 ≥", 1, 12, 3)
     conditions.append(("dealer_days", {"days": d}))
 if st.sidebar.checkbox(
-        "自營商最新買超(當日)", value=False,
+        "自營商最新買超(當日)", key="c_dealer_net",
         help="只看最近一個交易日自營商是否買超。"):
     conditions.append(("dealer_net", {}))
 if st.sidebar.checkbox(
-        "三大法人合計買超(當日)", value=False,
+        "三大法人合計買超(當日)", key="c_total_net",
         help="外資+投信+自營商當日合計為買超,代表法人整體偏多,"
              "比單看一隻法人更能反映法人對該股的整體態度。"):
     conditions.append(("total_net", {}))
 
 st.sidebar.markdown("**基本面(月營收)**")
 if st.sidebar.checkbox(
-        "營收年增達標", value=False,
+        "營收年增達標", key="c_rev_yoy",
         help="當月營收比去年同月成長達到設定的 %(去除淡旺季影響)。代表公司本業在成長,"
              "是基本面轉強的指標。篩出「生意越做越大」的股票。"):
-    v = st.sidebar.slider("　└ 營收年增 ≥ (%)", -20, 100, 10)
+    v = st.sidebar.slider("　└ 營收年增 ≥ (%)", -20, 100, key="p_rev_yoy")
     conditions.append(("rev_yoy", {"min_yoy": v}))
 if st.sidebar.checkbox(
-        "營收連續成長", value=False,
+        "營收連續成長", key="c_rev_growth",
         help="營收年增「連續多個月」都是正的,代表成長有持續性而非曇花一現。"
              "篩出「成長動能穩定」的股票。"):
     n = st.sidebar.number_input("　└ 連續成長 ≥ (月)", 1, 12, 3)
     conditions.append(("rev_growth", {"months": n}))
 if st.sidebar.checkbox(
-        "營收創近一年新高", value=False,
+        "營收創近一年新高", key="c_rev_high",
         help="當月營收是近一年來最高,代表營運動能強勁、可能進入成長爆發期。"):
     conditions.append(("rev_high", {}))
 
@@ -229,7 +280,8 @@ def render_screening():
         try:
             bundle = load_bundle(tuple(pool))
             revenue_sii = load_revenue("sii")
-            metrics = build_metrics(bundle, revenue_sii)
+            index_ret = load_index_returns()
+            metrics = build_metrics(bundle, revenue_sii, index_ret)
         except Exception as e:  # noqa: BLE001
             st.error(f"抓取資料失敗,請稍後再試或檢查網路。\n\n{e}")
             return
@@ -254,6 +306,8 @@ def render_screening():
 
     cond_text = {
         "above_ma": lambda p: f"站上{p['period']}日線",
+        "ma_bull": lambda p: "均線多頭排列",
+        "rs": lambda p: f"贏大盤≥{p['min_rs']}%({p['period']}日)",
         "trust": lambda p: f"投信連買≥{p['days']}天",
         "foreign_days": lambda p: f"外資連買≥{p['days']}天",
         "foreign_net": lambda p: "外資當日買超",

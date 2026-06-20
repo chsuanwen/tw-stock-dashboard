@@ -79,6 +79,23 @@ def _yahoo_prices_batch(stock_ids):
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
 
 
+def fetch_index_returns():
+    """大盤(加權指數 ^TWII)的 3 日 / 30 日漲跌幅(%),供相對強度 RS 計算。"""
+    try:
+        h = yf.Ticker("^TWII").history(start=config.PRICE_START_DATE, auto_adjust=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 大盤指數抓取失敗: {e}")
+        return {}
+    if h.empty:
+        return {}
+    closes = h["Close"].reset_index(drop=True)
+    out = {}
+    for n in (3, 30):
+        if len(closes) > n and closes.iloc[-1 - n]:
+            out[n] = round((closes.iloc[-1] / closes.iloc[-1 - n] - 1) * 100, 2)
+    return out
+
+
 def fetch_universe():
     """全上市股票清單(代號 / 名稱 / 產業別),供依產業選股。"""
     cols = ["stock_id", "name", "industry"]

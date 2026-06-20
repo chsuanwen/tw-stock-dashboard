@@ -51,11 +51,13 @@ def _revenue_metrics(rv):
     }
 
 
-def build_metrics(bundle, revenue=None):
+def build_metrics(bundle, revenue=None, index_ret=None):
     """彙整每檔股票的最新指標(以日線為準),回傳 DataFrame(一檔一列)。
 
     revenue: 選用,datasource.fetch_revenue() 的回傳;提供時計算基本面(營收)指標。
+    index_ret: 選用,大盤 N 日漲幅 {3: x, 30: y};提供時計算相對強度 RS。
     """
+    index_ret = index_ret or {}
     stocks = bundle["stocks"]
     price = bundle["price"]
     inst = bundle["inst"]
@@ -77,13 +79,16 @@ def build_metrics(bundle, revenue=None):
             "close": round(close, 2),
             "volume": volume,
         }
-        # N 個交易日前到今天的漲跌幅(%):強勢股排名用
+        # N 個交易日前到今天的漲跌幅(%):強勢股排名用;並算相對強度 RS(贏大盤幅度)
         closes = p["close"].reset_index(drop=True)
         for n in (3, 30):
             if len(closes) > n and closes.iloc[-1 - n]:
-                rec[f"ret_{n}d"] = round((closes.iloc[-1] / closes.iloc[-1 - n] - 1) * 100, 2)
+                ret = round((closes.iloc[-1] / closes.iloc[-1 - n] - 1) * 100, 2)
             else:
-                rec[f"ret_{n}d"] = None
+                ret = None
+            rec[f"ret_{n}d"] = ret
+            ir = index_ret.get(n)
+            rec[f"rs_{n}d"] = round(ret - ir, 2) if (ret is not None and ir is not None) else None
         # 各周期均線、均量、區間最高收盤
         for n in MA_PERIODS:
             v = p["close"].rolling(n).mean().iloc[-1]
@@ -170,6 +175,15 @@ def _cond_breakout(m, window=20):
     return m["new_high_days"].fillna(1) >= window
 
 
+def _cond_ma_bullish(m):
+    return (m["ma5"] > m["ma20"]) & (m["ma20"] > m["ma60"])
+
+
+def _cond_rs(m, period=30, min_rs=0.0):
+    col = "rs_3d" if period == 3 else "rs_30d"
+    return m[col].fillna(-9999) >= min_rs
+
+
 def _cond_rev_yoy(m, min_yoy=10):
     return m["rev_yoy"].fillna(-9999) >= min_yoy
 
@@ -184,6 +198,8 @@ def _cond_rev_high(m):
 
 _CONDITIONS = {
     "above_ma": _cond_above_ma,
+    "ma_bull": _cond_ma_bullish,
+    "rs": _cond_rs,
     "trust": _cond_trust,
     "foreign_days": _cond_foreign_days,
     "foreign_net": _cond_foreign_net,
