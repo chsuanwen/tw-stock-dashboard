@@ -169,125 +169,122 @@ if st.sidebar.button("🔄 立即重抓最新資料"):
 
 
 # ==========================================================================
-# 抓資料 + 算指標 + 套用條件
+# 篩選 + 強勢股排名(需先選產業才會執行)
 # ==========================================================================
-if not pool:
-    st.info("👈 請先從左側「追蹤股池」**選擇產業**,並設定選股條件,"
-            "系統就會在這裡列出符合條件的標的與強勢股排名。")
-    st.stop()
+def render_screening():
+    with st.spinner(f"正在抓取 {len(pool)} 檔股票資料(Yahoo / 證交所 / MOPS)…"
+                    "(檔數多時首次需數十秒~數分鐘,之後快取秒開)"):
+        try:
+            bundle = load_bundle(tuple(pool))
+            revenue_sii = load_revenue("sii")
+            metrics = build_metrics(bundle, revenue_sii)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"抓取資料失敗,請稍後再試或檢查網路。\n\n{e}")
+            return
 
-with st.spinner(f"正在抓取 {len(pool)} 檔股票資料(Yahoo / 證交所 / MOPS)…"
-                "(檔數多時首次需數十秒~數分鐘,之後快取秒開)"):
-    try:
-        bundle = load_bundle(tuple(pool))
-        revenue_sii = load_revenue("sii")
-        metrics = build_metrics(bundle, revenue_sii)
-    except Exception as e:  # noqa: BLE001
-        st.error(f"抓取資料失敗,請稍後再試或檢查網路。\n\n{e}")
-        st.stop()
+    if metrics.empty:
+        st.warning("抓不到資料,請稍候再按「立即重抓最新資料」。")
+        return
 
-if metrics.empty:
-    st.warning("抓不到資料,請稍候再按「立即重抓最新資料」。")
-    st.stop()
+    # 用全市場清單補上正確的名稱與產業別
+    metrics = metrics.copy()
+    if not universe.empty:
+        nm = dict(zip(universe["stock_id"], universe["name"]))
+        im = dict(zip(universe["stock_id"], universe["industry"]))
+        metrics["name"] = metrics["stock_id"].map(nm).fillna(metrics["name"])
+        metrics["industry"] = metrics["stock_id"].map(im).fillna("")
+    else:
+        metrics["industry"] = ""
+    metrics["個股"] = metrics["stock_id"].apply(quote_url)
+    metrics["新聞"] = metrics.apply(lambda r: news_url(r["stock_id"], r["name"]), axis=1)
 
-# 用全市場清單補上正確的名稱與產業別
-metrics = metrics.copy()
-if not universe.empty:
-    nm = dict(zip(universe["stock_id"], universe["name"]))
-    im = dict(zip(universe["stock_id"], universe["industry"]))
-    metrics["name"] = metrics["stock_id"].map(nm).fillna(metrics["name"])
-    metrics["industry"] = metrics["stock_id"].map(im).fillna("")
+    result = apply_filters(metrics, conditions, logic)
+
+    cond_text = {
+        "above_ma": lambda p: f"站上{p['period']}日線",
+        "trust": lambda p: f"投信連買≥{p['days']}天",
+        "foreign_days": lambda p: f"外資連買≥{p['days']}天",
+        "foreign_net": lambda p: "外資當日買超",
+        "dealer_days": lambda p: f"自營商連買≥{p['days']}天",
+        "dealer_net": lambda p: "自營商當日買超",
+        "total_net": lambda p: "三大法人合計買超",
+        "volume": lambda p: f"量>{p['ratio']}倍{p['window']}日均量",
+        "breakout": lambda p: f"突破{p['window']}日新高",
+        "rev_yoy": lambda p: f"營收年增≥{p['min_yoy']}%",
+        "rev_growth": lambda p: f"營收連續成長≥{p['months']}月",
+        "rev_high": lambda p: "營收創近一年新高",
+    }
+    active_desc = "、".join(cond_text[k](p) for k, p in conditions) or "(未設條件,顯示全部)"
+    st.caption(f"資料日期:{metrics['date'].max()}　|　追蹤 {len(metrics)} 檔　|　"
+               f"條件【{logic}】:{active_desc}")
+
+    c1, c2 = st.columns(2)
+    c1.metric("追蹤股票數", len(metrics))
+    c2.metric("符合條件", len(result))
+
+    # --- 篩選結果表(含個股 / 新聞連結)---
+    st.subheader("✅ 符合條件的標的")
+    display = result.copy()
+    if not display.empty:
+        display["量比5"] = (display["volume"] / display["vol_ma5"]).round(2)
+        display["foreign_net"] = display["foreign_net"].apply(
+            lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
+        display["三大法人合計"] = display["total_net"].apply(
+            lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
+        display["營收年增"] = display["rev_yoy"].apply(
+            lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
+    display = display.reindex(columns=[
+        "stock_id", "name", "date", "close", "ma20",
+        "trust_buy_days", "foreign_buy_days", "dealer_buy_days",
+        "foreign_net", "三大法人合計",
+        "營收年增", "rev_growth_months", "量比5", "個股", "新聞"])
+    st.dataframe(
+        display.rename(columns={
+            "stock_id": "代號", "name": "名稱", "date": "資料日", "close": "收盤",
+            "ma20": "月線(MA20)", "trust_buy_days": "投信連買(天)",
+            "foreign_buy_days": "外資連買(天)", "dealer_buy_days": "自營商連買(天)",
+            "foreign_net": "外資買賣超(股)", "三大法人合計": "三大法人合計(股)",
+            "rev_growth_months": "營收連續成長(月)",
+        }),
+        use_container_width=True, hide_index=True, column_config=LINK_COLS,
+    )
+
+    # --- 強勢股排名(3日 / 30日 漲幅)---
+    st.subheader("🏆 強勢股排名(依區間漲幅)")
+    period = st.radio("排名區間", ["3 日", "30 日"], horizontal=True, index=1,
+                      help="以 N 個交易日前到今天的收盤價漲跌幅排序。")
+    col = "ret_3d" if period.startswith("3 ") else "ret_30d"
+    rank = metrics[["stock_id", "name", "industry", "close", col, "個股", "新聞"]].dropna(subset=[col]).copy()
+    rank = rank.sort_values(col, ascending=False).reset_index(drop=True)
+    rank.insert(0, "名次", rank.index + 1)
+    rank["漲跌幅"] = rank[col].apply(lambda v: f"{v:+.2f}%")
+    rank = rank[["名次", "stock_id", "name", "industry", "close", "漲跌幅", "個股", "新聞"]]
+    st.dataframe(
+        rank.rename(columns={"stock_id": "代號", "name": "名稱",
+                             "industry": "產業", "close": "收盤"}),
+        use_container_width=True, hide_index=True, column_config=LINK_COLS,
+    )
+
+    # --- 清單內個股線圖 ---
+    st.subheader("📊 清單內個股技術線圖")
+    col_a, col_b = st.columns([3, 2])
+    options = result["stock_id"].tolist() if not result.empty else metrics["stock_id"].tolist()
+    labels = {r["stock_id"]: f'{r["stock_id"]} {r["name"]}' for _, r in metrics.iterrows()}
+    with col_a:
+        sel = st.selectbox("選擇股票", options, format_func=lambda s: labels.get(s, s))
+    with col_b:
+        tf = st.radio("時間週期", ["日", "週", "月"], horizontal=True, index=0, key="list_tf")
+    if sel:
+        hist = get_price_history(bundle, sel, tf)
+        if not hist.empty:
+            st.plotly_chart(make_kline_fig(hist, tf), use_container_width=True)
+
+
+if pool:
+    render_screening()
 else:
-    metrics["industry"] = ""
-metrics["個股"] = metrics["stock_id"].apply(quote_url)
-metrics["新聞"] = metrics.apply(lambda r: news_url(r["stock_id"], r["name"]), axis=1)
-
-result = apply_filters(metrics, conditions, logic)
-
-cond_text = {
-    "above_ma": lambda p: f"站上{p['period']}日線",
-    "trust": lambda p: f"投信連買≥{p['days']}天",
-    "foreign_days": lambda p: f"外資連買≥{p['days']}天",
-    "foreign_net": lambda p: "外資當日買超",
-    "dealer_days": lambda p: f"自營商連買≥{p['days']}天",
-    "dealer_net": lambda p: "自營商當日買超",
-    "total_net": lambda p: "三大法人合計買超",
-    "volume": lambda p: f"量>{p['ratio']}倍{p['window']}日均量",
-    "breakout": lambda p: f"突破{p['window']}日新高",
-    "rev_yoy": lambda p: f"營收年增≥{p['min_yoy']}%",
-    "rev_growth": lambda p: f"營收連續成長≥{p['months']}月",
-    "rev_high": lambda p: "營收創近一年新高",
-}
-active_desc = "、".join(cond_text[k](p) for k, p in conditions) or "(未設條件,顯示全部)"
-st.caption(f"資料日期:{metrics['date'].max()}　|　追蹤 {len(metrics)} 檔　|　"
-           f"條件【{logic}】:{active_desc}")
-
-c1, c2 = st.columns(2)
-c1.metric("追蹤股票數", len(metrics))
-c2.metric("符合條件", len(result))
-
-# ==========================================================================
-# 篩選結果表(含個股 / 新聞連結)
-# ==========================================================================
-st.subheader("✅ 符合條件的標的")
-display = result.copy()
-if not display.empty:
-    display["量比5"] = (display["volume"] / display["vol_ma5"]).round(2)
-    display["foreign_net"] = display["foreign_net"].apply(
-        lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
-    display["三大法人合計"] = display["total_net"].apply(
-        lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
-    display["營收年增"] = display["rev_yoy"].apply(
-        lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
-display = display.reindex(columns=[
-    "stock_id", "name", "date", "close", "ma20",
-    "trust_buy_days", "foreign_buy_days", "dealer_buy_days",
-    "foreign_net", "三大法人合計",
-    "營收年增", "rev_growth_months", "量比5", "個股", "新聞"])
-st.dataframe(
-    display.rename(columns={
-        "stock_id": "代號", "name": "名稱", "date": "資料日", "close": "收盤",
-        "ma20": "月線(MA20)", "trust_buy_days": "投信連買(天)",
-        "foreign_buy_days": "外資連買(天)", "dealer_buy_days": "自營商連買(天)",
-        "foreign_net": "外資買賣超(股)", "三大法人合計": "三大法人合計(股)",
-        "rev_growth_months": "營收連續成長(月)",
-    }),
-    use_container_width=True, hide_index=True, column_config=LINK_COLS,
-)
-
-# ==========================================================================
-# 🏆 強勢股排名(3日 / 30日 漲幅)
-# ==========================================================================
-st.subheader("🏆 強勢股排名(依區間漲幅)")
-period = st.radio("排名區間", ["3 日", "30 日"], horizontal=True, index=1,
-                  help="以 N 個交易日前到今天的收盤價漲跌幅排序。")
-col = "ret_3d" if period.startswith("3 ") else "ret_30d"
-rank = metrics[["stock_id", "name", "industry", "close", col, "個股", "新聞"]].dropna(subset=[col]).copy()
-rank = rank.sort_values(col, ascending=False).reset_index(drop=True)
-rank.insert(0, "名次", rank.index + 1)
-rank["漲跌幅"] = rank[col].apply(lambda v: f"{v:+.2f}%")
-rank = rank[["名次", "stock_id", "name", "industry", "close", "漲跌幅", "個股", "新聞"]]
-st.dataframe(
-    rank.rename(columns={"stock_id": "代號", "name": "名稱",
-                         "industry": "產業", "close": "收盤"}),
-    use_container_width=True, hide_index=True, column_config=LINK_COLS,
-)
-
-# ==========================================================================
-# 清單內個股線圖
-# ==========================================================================
-st.subheader("📊 清單內個股技術線圖")
-col_a, col_b = st.columns([3, 2])
-options = result["stock_id"].tolist() if not result.empty else metrics["stock_id"].tolist()
-labels = {r["stock_id"]: f'{r["stock_id"]} {r["name"]}' for _, r in metrics.iterrows()}
-with col_a:
-    sel = st.selectbox("選擇股票", options, format_func=lambda s: labels.get(s, s))
-with col_b:
-    tf = st.radio("時間週期", ["日", "週", "月"], horizontal=True, index=0, key="list_tf")
-if sel:
-    hist = get_price_history(bundle, sel, tf)
-    if not hist.empty:
-        st.plotly_chart(make_kline_fig(hist, tf), use_container_width=True)
+    st.info("👈 此區為「篩選 + 強勢股排名」:請先從左側「追蹤股池」**選擇產業**並設定條件即可顯示。"
+            "(下方「個股健檢」可直接輸入代號查詢,**不需**選產業)")
 
 
 # ==========================================================================
